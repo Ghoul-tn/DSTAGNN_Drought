@@ -5,30 +5,33 @@ import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
 from numba import jit, prange
-from scipy.spatial.distance import cdist
 from tqdm import tqdm
 import time
 
+@jit(nopython=True)
+def euclidean_distance(a, b):
+    """Numba-compatible Euclidean distance"""
+    return np.sqrt(np.sum((a - b)**2))
+
 @jit(nopython=True, parallel=True)
 def calculate_distances(coords, data_reduced, max_distance=10.0):
-    """Numba-optimized distance calculation for nearby nodes"""
+    """Fully Numba-optimized distance calculation"""
     n_nodes = coords.shape[0]
     sta_matrix = np.zeros((n_nodes, n_nodes))
     
     for i in prange(n_nodes):
-        # Find nodes within spatial neighborhood
-        distances = cdist(coords[i:i+1], coords)[0]
-        neighbors = np.where(distances <= max_distance)[0]
-        neighbors = neighbors[neighbors > i]  # Upper triangle only
-        
-        for j in neighbors:
-            # Cosine distance between reduced features
-            x = data_reduced[i]
-            y = data_reduced[j]
-            norm_x = np.sqrt(np.sum(x**2)) + 1e-12
-            norm_y = np.sqrt(np.sum(y**2)) + 1e-12
-            sta_matrix[i,j] = 1 - np.dot(x, y) / (norm_x * norm_y)
+        for j in range(i+1, n_nodes):
+            # Calculate spatial distance manually
+            spatial_dist = euclidean_distance(coords[i], coords[j])
             
+            if spatial_dist <= max_distance:
+                # Calculate temporal similarity
+                x = data_reduced[i]
+                y = data_reduced[j]
+                norm_x = np.sqrt(np.sum(x**2)) + 1e-12
+                norm_y = np.sqrt(np.sum(y**2)) + 1e-12
+                sta_matrix[i,j] = 1 - np.dot(x, y) / (norm_x * norm_y)
+                
     return sta_matrix
 
 def process_dataset(data_path, dataset_name, sparsity=0.01):
@@ -44,65 +47,50 @@ def process_dataset(data_path, dataset_name, sparsity=0.01):
     print(f"PCA reduced dimensions from {data_reshaped.shape[1]} to {data_reduced.shape[1]}")
     print(f"Explained variance: {np.sum(pca.explained_variance_ratio_):.2%}")
     
-    # 2. Get spatial coordinates from valid indices
-    valid_pixels = ~np.isnan(data[0,:,0])  # Using NDVI for mask
+    # 2. Get spatial coordinates
+    valid_pixels = ~np.isnan(data[0,:,0])
     coords = np.array(np.where(valid_pixels)).T  # (2139, 2)
     
-    # 3. Calculate distances (optimized)
+    # 3. Calculate distances
     print("Calculating spatial-temporal distances...")
     start_time = time.time()
     sta_matrix = calculate_distances(coords, data_reduced)
     sta_matrix = sta_matrix + sta_matrix.T  # Symmetrize
-    np.fill_diagonal(sta_matrix, 0)  # Zero diagonals
+    np.fill_diagonal(sta_matrix, 0)
     
     print(f"Distance calculation completed in {(time.time()-start_time)/60:.1f} minutes")
     
-    # 4. Create both adjacency matrices
+    # 4. Create adjacency matrices
     print("Creating adjacency matrices...")
     n_nodes = sta_matrix.shape[0]
     k = max(1, int(n_nodes * sparsity))
     
-    # Binary adjacency (stag)
     A_adj = np.zeros_like(sta_matrix)
-    # Weighted adjacency (strg)
     R_adj = np.zeros_like(sta_matrix)
     
     for i in range(n_nodes):
         neighbors = np.argsort(sta_matrix[i])[:k]
         A_adj[i, neighbors] = 1
-        R_adj[i, neighbors] = 1 - sta_matrix[i, neighbors]  # Convert distance to similarity
+        R_adj[i, neighbors] = 1 - sta_matrix[i, neighbors]
     
-    # Save results with original naming convention
+    # Save results
     output_dir = os.path.dirname(data_path)
     
-    # STA matrix (numpy format)
     np.save(os.path.join(output_dir, f"stag_001_{dataset_name}.npy"), sta_matrix)
+    pd.DataFrame(A_adj).to_csv(os.path.join(output_dir, f"stag_001_{dataset_name}.csv"), header=False, index=False)
+    pd.DataFrame(R_adj).to_csv(os.path.join(output_dir, f"strg_001_{dataset_name}.csv"), header=False, index=False)
     
-    # Binary adjacency (csv)
-    pd.DataFrame(A_adj).to_csv(
-        os.path.join(output_dir, f"stag_001_{dataset_name}.csv"), 
-        header=False, 
-        index=False
-    )
-    
-    # Weighted adjacency (csv)
-    pd.DataFrame(R_adj).to_csv(
-        os.path.join(output_dir, f"strg_001_{dataset_name}.csv"), 
-        header=False, 
-        index=False
-    )
-    
-    print("\nGenerated files:")
-    print(f"- stag_001_{dataset_name}.npy (STA matrix)")
-    print(f"- stag_001_{dataset_name}.csv (binary adjacency)")
-    print(f"- strg_001_{dataset_name}.csv (weighted adjacency)")
+    print("\nSuccessfully generated:")
+    print(f"- stag_001_{dataset_name}.npy")
+    print(f"- stag_001_{dataset_name}.csv")
+    print(f"- strg_001_{dataset_name}.csv")
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description='Generate STA-graph files for drought prediction')
-    parser.add_argument("--input", required=True, help="Path to input .npz file")
-    parser.add_argument("--dataset", required=True, help="Dataset name (e.g., GAMBIA)")
-    parser.add_argument("--sparsity", type=float, default=0.01, help="Connection sparsity (0.01 = 1%)")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True, help="Input .npz file path")
+    parser.add_argument("--dataset", required=True, help="Dataset name")
+    parser.add_argument("--sparsity", type=float, default=0.01, help="Connection sparsity")
     
     args = parser.parse_args()
     
