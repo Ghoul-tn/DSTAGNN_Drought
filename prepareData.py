@@ -65,16 +65,20 @@ def get_sample_indices(data_sequence, num_of_weeks, num_of_days, num_of_hours,
 def read_and_generate_dataset(graph_signal_matrix_filename,
                              num_of_weeks, num_of_days,
                              num_of_hours, num_for_predict,
-                             points_per_hour=1, save=False):  # Changed to 1 for monthly data
+                             points_per_hour=1, save=False):
+    
     data_seq = np.load(graph_signal_matrix_filename)['data']
     
-    # For drought data, we'll use all features as input and predict SPI (last feature)
+    # Ensure the data has the right shape (timesteps, nodes, features)
+    if len(data_seq.shape) == 4:
+        data_seq = data_seq.squeeze(axis=2)  # Remove singleton dimension if exists
+    
     all_samples = []
     for idx in range(data_seq.shape[0]):
         sample = get_sample_indices(data_seq, num_of_weeks, num_of_days,
-                                   num_of_hours, idx, num_for_predict,
-                                   points_per_hour)
-        if ((sample[0] is None) and (sample[1] is None) and (sample[2] is None)):
+                                  num_of_hours, idx, num_for_predict,
+                                  points_per_hour)
+        if ((sample[0] is None) and (sample[1] is None) and (sample[2] is None):
             continue
 
         week_sample, day_sample, hour_sample, target = sample
@@ -92,8 +96,7 @@ def read_and_generate_dataset(graph_signal_matrix_filename,
             hour_sample = np.expand_dims(hour_sample, axis=0).transpose((0, 2, 3, 1))
             sample.append(hour_sample)
 
-        # Target is SPI (last feature)
-        target = np.expand_dims(target, axis=0).transpose((0, 2, 3, 1))[:, :, -1, :]  # Only keep SPI
+        target = np.expand_dims(target, axis=0).transpose((0, 2, 3, 1))[:, :, -1, :]
         sample.append(target)
 
         time_sample = np.expand_dims(np.array([idx]), axis=0)
