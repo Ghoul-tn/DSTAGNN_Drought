@@ -234,16 +234,16 @@ class Embedding(nn.Module):
 
     def forward(self, x, batch_size):
         if self.Etype == 'T':
-            pos = torch.arange(self.nb_seq, dtype=torch.long).cuda()
-            pos = pos.unsqueeze(0).unsqueeze(0).expand(batch_size, self.num_of_features,
-                                                   self.nb_seq)  # [seq_len] -> [batch_size, seq_len]
-            embedding = x.permute(0, 2, 3, 1) + self.pos_embed(pos)
+            # For temporal embedding
+            pos = torch.arange(x.size(2), dtype=torch.long).to(x.device)  # Use actual sequence length
+            pos = pos.unsqueeze(0).unsqueeze(0).expand(batch_size, self.num_of_features, -1)
+            embedding = x.permute(0, 1, 3, 2) + self.pos_embed(pos)  # [B,N,T,F] + [B,F,T,d_Em]
         else:
-            pos = torch.arange(self.nb_seq, dtype=torch.long).cuda()
-            pos = pos.unsqueeze(0).expand(batch_size, self.nb_seq)
-            embedding = x + self.pos_embed(pos)
-        Emx = self.norm(embedding)
-        return Emx
+            # For spatial embedding
+            pos = torch.arange(x.size(1), dtype=torch.long).to(x.device)
+            pos = pos.unsqueeze(0).expand(batch_size, -1)
+            embedding = x + self.pos_embed(pos).unsqueeze(-1)
+        return self.norm(embedding)
 
 
 class GTU(nn.Module):
