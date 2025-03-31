@@ -78,7 +78,7 @@ def read_and_generate_dataset(graph_signal_matrix_filename,
         sample = get_sample_indices(data_seq, num_of_weeks, num_of_days,
                                   num_of_hours, idx, num_for_predict,
                                   points_per_hour)
-        if ((sample[0] is None) and (sample[1] is None) and (sample[2] is None):
+        if ((sample[0] is None) and (sample[1] is None) and (sample[2] is None)):
             continue
 
         week_sample, day_sample, hour_sample, target = sample
