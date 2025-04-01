@@ -14,10 +14,8 @@ from model.DSTAGNN_my import make_model
 from lib.dataloader import load_weighted_adjacency_matrix, load_weighted_adjacency_matrix2, load_PA
 from lib.utils1 import load_graphdata_channel1, get_adjacency_matrix2, compute_val_loss_mstgcn, predict_and_save_results_mstgcn
 from tensorboardX import SummaryWriter
-import torch_xla
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.parallel_loader as pl
-import torch_xla.distributed.xla_multiprocessing as xmp
 
 def seed_torch(seed):
     random.seed(seed)
@@ -30,50 +28,51 @@ def seed_torch(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def _mp_fn(index, args):
-    # TPU core initialization
+def main():
+    # Initialize TPU
     device = xm.xla_device()
     
-    # Parse config file
+    # Parse arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default='configurations/PEMS04_dstagnn.conf', type=str,
+                       help="configuration file path")
+    args = parser.parse_args()
+    
+    # Load config
     config = configparser.ConfigParser()
     config.read(args.config)
     data_config = config['Data']
     training_config = config['Training']
 
-    # Load data and model
-    adj_filename = data_config['adj_filename']
-    graph_signal_matrix_filename = data_config['graph_signal_matrix_filename']
-    stag_filename = data_config['stag_filename']
-    strg_filename = data_config['strg_filename']
-    id_filename = data_config['id_filename'] if config.has_option('Data', 'id_filename') else None
+    # Set seed
+    seed_torch(1)
 
-    num_of_vertices = int(data_config['num_of_vertices'])
-    points_per_hour = int(data_config['points_per_hour'])
-    num_for_predict = int(data_config['num_for_predict'])
-    len_input = int(data_config['len_input'])
-    dataset_name = data_config['dataset_name']
-
-    # Load data - modified for TPU
+    # Load data
     train_loader, train_target_tensor, val_loader, val_target_tensor, test_loader, test_target_tensor, _mean, _std = load_graphdata_channel1(
-        graph_signal_matrix_filename, 
+        data_config['graph_signal_matrix_filename'],
         int(training_config['num_of_hours']),
         int(training_config['num_of_days']),
         int(training_config['num_of_weeks']),
         device,
         int(training_config['batch_size']))
     
-    # Convert to XLA parallel loaders
+    # Convert to parallel loaders
     train_loader = pl.MpDeviceLoader(train_loader, device)
     val_loader = pl.MpDeviceLoader(val_loader, device)
     test_loader = pl.MpDeviceLoader(test_loader, device)
 
     # Load adjacency matrices
-    if dataset_name in ['PEMS04', 'PEMS08', 'PEMS07', 'PEMS03']:
-        adj_mx = get_adjacency_matrix2(adj_filename, num_of_vertices, id_filename=id_filename)
+    if data_config['dataset_name'] in ['PEMS04', 'PEMS08', 'PEMS07', 'PEMS03']:
+        adj_mx = get_adjacency_matrix2(data_config['adj_filename'], 
+                                     int(data_config['num_of_vertices']), 
+                                     id_filename=data_config.get('id_filename'))
     else:
-        adj_mx = load_weighted_adjacency_matrix2(adj_filename, num_of_vertices)
-    adj_TMD = load_weighted_adjacency_matrix(stag_filename, num_of_vertices)
-    adj_pa = load_PA(strg_filename)
+        adj_mx = load_weighted_adjacency_matrix2(data_config['adj_filename'], 
+                                               int(data_config['num_of_vertices']))
+    
+    adj_TMD = load_weighted_adjacency_matrix(data_config['stag_filename'], 
+                                           int(data_config['num_of_vertices']))
+    adj_pa = load_PA(data_config['strg_filename'])
 
     # Model setup
     graph_use = training_config['graph']
@@ -91,9 +90,9 @@ def _mp_fn(index, args):
         adj_merge,
         adj_pa,
         adj_TMD,
-        num_for_predict,
-        len_input,
-        num_of_vertices,
+        int(data_config['num_for_predict']),
+        int(data_config['len_input']),
+        int(data_config['num_of_vertices']),
         int(training_config['d_model']),
         int(training_config['d_k']),
         int(training_config['d_k']),  # d_v = d_k
@@ -109,7 +108,7 @@ def _mp_fn(index, args):
         training_config['in_channels'],
         float(training_config['learning_rate']))
     
-    params_path = os.path.join('myexperiments', dataset_name, folder_dir)
+    params_path = os.path.join('myexperiments', data_config['dataset_name'], folder_dir)
     if xm.is_master_ordinal():
         if not os.path.exists(params_path):
             os.makedirs(params_path)
@@ -171,11 +170,10 @@ def _mp_fn(index, args):
         print(f'Final Test Loss: {test_loss/len(test_loader):.4f}')
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default='configurations/PEMS04_dstagnn.conf', type=str,
-                       help="configuration file path")
-    args = parser.parse_args()
-    
-    # TPU-specific settings
-    torch.set_default_tensor_type('torch.FloatTensor')
-    xmp.spawn(_mp_fn, args=(args,), nprocs=8, start_method='fork')
+    # Kaggle-specific TPU initialization
+    if 'COLAB_TPU_ADDR' in os.environ or 'TPU_NAME' in os.environ:
+        import torch_xla.distributed.xla_multiprocessing as xmp
+        xmp.spawn(main, nprocs=8, start_method='fork')
+    else:
+        # Fallback to single TPU core if not in Colab/Kaggle
+        main()
