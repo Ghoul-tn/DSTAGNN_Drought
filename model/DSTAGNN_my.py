@@ -243,40 +243,33 @@ class Embedding(nn.Module):
         if self.Etype == 'T':
             # Input shape: (B, N, F, T)
             B, N, F, T = x.shape
-            print(f"Shape before embedding: {x.shape}")
+            
             # Get positional embeddings
             pos = torch.arange(T, dtype=torch.long).to(x.device)
             pos_embed = self.pos_embed(pos)  # (T, d_Em)
             
-            # Reshape for broadcasting
-            pos_embed = pos_embed.permute(1, 0)  # (d_Em, T)
-            pos_embed = pos_embed.reshape(1, 1, 1, -1, T)  # (1, 1, 1, d_Em, T)
+            # Reshape for broadcasting: (1, 1, 1, T, d_Em)
+            pos_embed = pos_embed.unsqueeze(0).unsqueeze(0).unsqueeze(0)
             
-            # Process input
-            x = x.permute(0, 1, 3, 2)  # (B, N, T, F)
-            x = x.unsqueeze(3)  # (B, N, T, 1, F)
+            # Process input: (B, N, F, T) -> (B, N, F, T, 1)
+            x = x.unsqueeze(-1)
             
-            # Explicit broadcasting
-            x_expanded = x.expand(-1, -1, -1, pos_embed.size(3), -1)
-            pos_expanded = pos_embed.expand(B, N, -1, -1, F)
+            # Add with broadcasting
+            embedding = x + pos_embed  # (B, N, F, T, d_Em)
             
-            # Add with proper broadcasting
-            embedding = x_expanded + pos_expanded  # (B, N, T, d_Em, F)
-            
-            # Normalize
-            embedding = embedding.permute(0, 1, 4, 2, 3)  # (B, N, F, T, d_Em)
-            embedding = embedding.reshape(B*N*F*T, -1)
+            # Flatten for LayerNorm
+            embedding = embedding.reshape(-1, self.pos_embed.embedding_dim)
             embedding = self.norm(embedding)
-            # Reshape back
-            embedding= embedding.reshape(B, N, F, T, -1)[..., 0].permute(0, 1, 3, 2)
-            print(f"Shape after embedding: {embedding.shape}")
             
-            return embedding
+            # Reshape back: (B*N*F*T, d_Em) -> (B, N, F, T, d_Em) -> (B, N, d_Em, T)
+            return embedding.reshape(B, N, F, T, -1).permute(0, 1, 4, 3, 2)[..., 0]
         else:
             # Spatial embedding
+            # Input shape: (B, N, d_model)
             pos = torch.arange(x.size(1), dtype=torch.long).to(x.device)
-            pos_embed = self.pos_embed(pos)
-            return self.norm(x + pos_embed.unsqueeze(0))
+            pos_embed = self.pos_embed(pos)  # (N, d_model)
+            embedding = x + pos_embed.unsqueeze(0)  # (B, N, d_model)
+            return self.norm(embedding)
             
 class GTU(nn.Module):
     def __init__(self, in_channels, time_strides, kernel_size):
