@@ -228,22 +228,32 @@ class Embedding(nn.Module):
         super(Embedding, self).__init__()
         self.nb_seq = nb_seq
         self.Etype = Etype
-        self.num_of_features = num_of_features
-        self.pos_embed = nn.Embedding(nb_seq, d_Em)
-        self.norm = nn.LayerNorm(d_Em)
+        if Etype == 'T':
+            # For temporal embedding
+            self.pos_embed = nn.Embedding(nb_seq, d_Em)
+            self.norm = nn.LayerNorm(d_Em)
+        else:
+            # For spatial embedding
+            self.pos_embed = nn.Embedding(nb_seq, d_Em)
+            self.norm = nn.LayerNorm(d_Em)
 
     def forward(self, x, batch_size):
         if self.Etype == 'T':
-            pos = torch.arange(self.nb_seq, dtype=torch.long).cuda()
-            pos = pos.unsqueeze(0).unsqueeze(0).expand(batch_size, self.num_of_features,
-                                                   self.nb_seq)  # [seq_len] -> [batch_size, seq_len]
-            embedding = x.permute(0, 2, 3, 1) + self.pos_embed(pos)
+            # x shape: (B, N, F, T)
+            pos = torch.arange(x.size(3), dtype=torch.long).to(x.device)  # (T,)
+            pos_embed = self.pos_embed(pos)  # (T, d_Em)
+            # Reshape to match input
+            pos_embed = pos_embed.permute(1, 0).unsqueeze(0).unsqueeze(0)  # (1, 1, d_Em, T)
+            pos_embed = pos_embed.expand(batch_size, x.size(1), -1, -1)  # (B, N, d_Em, T)
+            # Combine with input
+            embedding = x + pos_embed
         else:
-            pos = torch.arange(self.nb_seq, dtype=torch.long).cuda()
-            pos = pos.unsqueeze(0).expand(batch_size, self.nb_seq)
-            embedding = x + self.pos_embed(pos)
-        Emx = self.norm(embedding)
-        return Emx
+            # x shape: (B, N, d_model)
+            pos = torch.arange(x.size(1), dtype=torch.long).to(x.device)  # (N,)
+            pos_embed = self.pos_embed(pos)  # (N, d_model)
+            pos_embed = pos_embed.unsqueeze(0).expand(batch_size, -1, -1)  # (B, N, d_model)
+            embedding = x + pos_embed
+        return self.norm(embedding)
 
 
 class GTU(nn.Module):
@@ -272,10 +282,10 @@ class DSTAGNN_block(nn.Module):
         self.sigmoid = nn.Sigmoid()
         self.tanh = nn.Tanh()
         self.relu = nn.ReLU(inplace=True)
-
+        self.num_of_timesteps = num_of_timesteps
         self.adj_pa = torch.FloatTensor(adj_pa).cuda()
 
-        self.pre_conv = nn.Conv2d(4, d_model, kernel_size=(1, num_of_d)) 
+        self.pre_conv = nn.Conv2d(num_of_d, d_model, kernel_size=(1, num_of_timesteps)) 
 
         self.EmbedT = Embedding(num_of_timesteps, num_of_vertices, num_of_d, 'T')
         self.EmbedS = Embedding(num_of_vertices, d_model, num_of_d, 'S')
@@ -307,7 +317,8 @@ class DSTAGNN_block(nn.Module):
         :return: (Batch_size, N, nb_time_filter, T)
         '''
         batch_size, num_of_vertices, num_of_features, num_of_timesteps = x.shape  # B,N,F,T
-
+        assert num_of_timesteps == self.num_of_timesteps, \
+            f"Input timesteps {num_of_timesteps} don't match configured {self.num_of_timesteps}"
         # TAT
         TEmx = self.EmbedT(x, batch_size)  # Should output [B, F, T, N]
         
