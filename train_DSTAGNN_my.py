@@ -165,7 +165,8 @@ def train_main():
         print('start epoch:', start_epoch)
 
         print('load weight from: ', params_filename)
-
+        
+    accumulation_steps = 4  # Process 4 batches before updating
     # train model
     for epoch in range(start_epoch, epochs):
         print('current epoch: ', epoch)
@@ -182,21 +183,22 @@ def train_main():
             print('save parameters to file: %s' % params_filename)
 
         net.train()  # ensure dropout layers are in train mode
-
+        optimizer.zero_grad()
         for batch_index, batch_data in enumerate(train_loader):
 
             encoder_inputs, labels = batch_data
 
-            optimizer.zero_grad()
-
-            outputs = net(encoder_inputs)
-
-            loss = criterion(outputs, labels)
-
+            # Forward pass with memory clearing
+            with torch.cuda.amp.autocast():  # Mixed precision
+                outputs = net(encoder_inputs)
+                loss = criterion(outputs, labels) / accumulation_steps
             loss.backward()
-
-            optimizer.step()
-
+            
+            if (batch_idx + 1) % accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+                torch.cuda.empty_cache()
+                
             training_loss = loss.item()
 
             global_step += 1
