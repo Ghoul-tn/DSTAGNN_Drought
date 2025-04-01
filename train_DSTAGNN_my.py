@@ -43,7 +43,7 @@ def main():
     training_config = config['Training']
     
     # Load data
-    train_loader, train_target, val_loader, val_target, test_loader, test_target, mean, std = load_graphdata_channel1(
+    train_x_tensor, train_loader, train_target_tensor, val_x_tensor, val_loader, val_target_tensor, test_x_tensor, test_loader, test_target_tensor, mean, std = load_graphdata_channel1(
         data_config['graph_signal_matrix_filename'],
         int(training_config['num_of_hours']),
         int(training_config['num_of_days']),
