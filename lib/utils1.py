@@ -299,7 +299,7 @@ def load_graphdata_channel1(graph_signal_matrix_filename, num_of_hours, num_of_d
     print('load file:', filename)
     file_data = np.load(filename + '.npz')
     
-    # Modified to keep all features
+    # Keep all features
     train_x = file_data['train_x']  # (B, N, F, T)
     train_target = file_data['train_target']  # (B, N, T)
     
@@ -309,10 +309,10 @@ def load_graphdata_channel1(graph_signal_matrix_filename, num_of_hours, num_of_d
     test_x = file_data['test_x']
     test_target = file_data['test_target']
 
-    mean = file_data['mean']  # Now using all features
-    std = file_data['std']    # Now using all features
+    mean = file_data['mean']
+    std = file_data['std']
 
-    # ------- Convert to tensors -------
+    # Convert to tensors
     train_x_tensor = torch.from_numpy(train_x).type(torch.FloatTensor).to(DEVICE)
     train_target_tensor = torch.from_numpy(train_target).type(torch.FloatTensor).to(DEVICE)
 
@@ -322,7 +322,7 @@ def load_graphdata_channel1(graph_signal_matrix_filename, num_of_hours, num_of_d
     test_x_tensor = torch.from_numpy(test_x).type(torch.FloatTensor).to(DEVICE)
     test_target_tensor = torch.from_numpy(test_target).type(torch.FloatTensor).to(DEVICE)
 
-    # ------- Create DataLoaders -------
+    # Create DataLoaders
     train_dataset = torch.utils.data.TensorDataset(train_x_tensor, train_target_tensor)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle)
 
@@ -336,7 +336,11 @@ def load_graphdata_channel1(graph_signal_matrix_filename, num_of_hours, num_of_d
     print('val:', val_x_tensor.size(), val_target_tensor.size())
     print('test:', test_x_tensor.size(), test_target_tensor.size())
 
-    return train_loader, train_target_tensor, val_loader, val_target_tensor, test_loader, test_target_tensor, mean, std
+    # Return all expected values
+    return (train_x_tensor, train_loader, train_target_tensor,
+            val_x_tensor, val_loader, val_target_tensor,
+            test_x_tensor, test_loader, test_target_tensor,
+            mean, std)
 
 
 def compute_val_loss_mstgcn(net, val_loader, criterion, sw, epoch, limit=None):
