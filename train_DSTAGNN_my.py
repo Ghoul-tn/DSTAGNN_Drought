@@ -1,86 +1,84 @@
 #!/usr/bin/env python
-import os
+# coding: utf-8
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+import os
+import random
+from time import time
+import shutil
 import argparse
 import configparser
-from time import time
 from model.DSTAGNN_my import make_model
 from lib.dataloader import load_weighted_adjacency_matrix, load_weighted_adjacency_matrix2, load_PA
-from lib.utils1 import load_graphdata_channel1, get_adjacency_matrix2
+from lib.utils1 import load_graphdata_channel1, get_adjacency_matrix2, compute_val_loss_mstgcn, predict_and_save_results_mstgcn
+from tensorboardX import SummaryWriter
+import torch_xla
+import torch_xla.core.xla_model as xm
+import torch_xla.distributed.parallel_loader as pl
+import torch_xla.distributed.xla_multiprocessing as xmp
 
-def setup_tpu():
-    try:
-        import torch_xla
-        import torch_xla.core.xla_model as xm
-        device = xm.xla_device()
-        print('Using TPU:', device)
-        return device, True
-    except ImportError:
-        print('torch_xla not available. Falling back to CPU/GPU.')
-        return torch.device('cuda' if torch.cuda.is_available() else 'cpu'), False
+def seed_torch(seed):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if xm.xrt_world_size() <= 1:
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
-def convert_adjacency_matrix(matrix, device):
-    """Convert adjacency matrix to proper tensor format for the target device"""
-    if isinstance(matrix, np.ndarray):
-        matrix = torch.FloatTensor(matrix)
-    elif isinstance(matrix, torch.Tensor):
-        matrix = matrix.float()
-    else:
-        raise ValueError("Unsupported matrix type")
-    return matrix.to(device)
-
-def main():
-    # Parse arguments
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True, help="Configuration file path")
-    args = parser.parse_args()
+def _mp_fn(index, args):
+    # TPU core initialization
+    device = xm.xla_device()
     
-    # Setup device
-    device, is_tpu = setup_tpu()
-    
-    # Load config
+    # Parse config file
     config = configparser.ConfigParser()
     config.read(args.config)
     data_config = config['Data']
     training_config = config['Training']
-    
-    # Load data
-    print("Loading data...")
-    train_x_tensor, train_loader, train_target_tensor, val_x_tensor, val_loader, val_target_tensor, test_x_tensor, test_loader, test_target_tensor, mean, std  = load_graphdata_channel1(
-        data_config['graph_signal_matrix_filename'],
+
+    # Load data and model
+    adj_filename = data_config['adj_filename']
+    graph_signal_matrix_filename = data_config['graph_signal_matrix_filename']
+    stag_filename = data_config['stag_filename']
+    strg_filename = data_config['strg_filename']
+    id_filename = data_config['id_filename'] if config.has_option('Data', 'id_filename') else None
+
+    num_of_vertices = int(data_config['num_of_vertices'])
+    points_per_hour = int(data_config['points_per_hour'])
+    num_for_predict = int(data_config['num_for_predict'])
+    len_input = int(data_config['len_input'])
+    dataset_name = data_config['dataset_name']
+
+    # Load data - modified for TPU
+    train_loader, train_target_tensor, val_loader, val_target_tensor, test_loader, test_target_tensor, _mean, _std = load_graphdata_channel1(
+        graph_signal_matrix_filename, 
         int(training_config['num_of_hours']),
         int(training_config['num_of_days']),
         int(training_config['num_of_weeks']),
         device,
-        int(training_config['batch_size']),
-        shuffle=True
-    )
+        int(training_config['batch_size']))
     
-    # Load and convert adjacency matrices
-    print("Loading adjacency matrices...")
-    adj_mx = get_adjacency_matrix2(
-        data_config['adj_filename'], 
-        int(data_config['num_of_vertices']),
-        id_filename=data_config.get('id_filename')
-    )
+    # Convert to XLA parallel loaders
+    train_loader = pl.MpDeviceLoader(train_loader, device)
+    val_loader = pl.MpDeviceLoader(val_loader, device)
+    test_loader = pl.MpDeviceLoader(test_loader, device)
+
+    # Load adjacency matrices
+    if dataset_name in ['PEMS04', 'PEMS08', 'PEMS07', 'PEMS03']:
+        adj_mx = get_adjacency_matrix2(adj_filename, num_of_vertices, id_filename=id_filename)
+    else:
+        adj_mx = load_weighted_adjacency_matrix2(adj_filename, num_of_vertices)
+    adj_TMD = load_weighted_adjacency_matrix(stag_filename, num_of_vertices)
+    adj_pa = load_PA(strg_filename)
+
+    # Model setup
+    graph_use = training_config['graph']
+    adj_merge = adj_mx if graph_use == 'G' else adj_TMD
     
-    adj_TMD = load_weighted_adjacency_matrix(
-        data_config['stag_filename'], 
-        int(data_config['num_of_vertices'])
-    )
-    
-    adj_pa = load_PA(data_config['strg_filename'])
-    
-    # Convert to tensors and move to device
-    adj_mx = convert_adjacency_matrix(adj_mx, device)
-    adj_TMD = convert_adjacency_matrix(adj_TMD, device)
-    adj_pa = convert_adjacency_matrix(adj_pa, device)
-    
-    # Initialize model
-    print("Initializing model...")
     net = make_model(
         device,
         int(training_config['in_channels']),
@@ -90,78 +88,94 @@ def main():
         int(training_config['nb_chev_filter']),
         int(training_config['nb_time_filter']),
         1,  # time_strides
-        adj_mx if training_config['graph'] == 'G' else adj_TMD,
+        adj_merge,
         adj_pa,
         adj_TMD,
-        int(data_config['num_for_predict']),
-        int(data_config['len_input']),
-        int(data_config['num_of_vertices']),
+        num_for_predict,
+        len_input,
+        num_of_vertices,
         int(training_config['d_model']),
         int(training_config['d_k']),
         int(training_config['d_k']),  # d_v = d_k
         int(training_config['n_heads'])
-    ).to(device)
+    )
     
     # Training setup
-    optimizer = optim.Adam(net.parameters(), lr=float(training_config['learning_rate']))
+    folder_dir = '{}_{}h{}d{}w_channel{}_{}'.format(
+        training_config['model_name'],
+        training_config['num_of_hours'],
+        training_config['num_of_days'],
+        training_config['num_of_weeks'],
+        training_config['in_channels'],
+        float(training_config['learning_rate']))
+    
+    params_path = os.path.join('myexperiments', dataset_name, folder_dir)
+    if xm.is_master_ordinal():
+        if not os.path.exists(params_path):
+            os.makedirs(params_path)
+        print(f'Params path: {params_path}')
+
     criterion = nn.SmoothL1Loss().to(device)
+    optimizer = optim.Adam(net.parameters(), lr=float(training_config['learning_rate']))
     
     # Training loop
-    print("Starting training...")
     best_val_loss = float('inf')
+    best_epoch = 0
+    start_epoch = int(training_config['start_epoch'])
+    epochs = int(training_config['epochs'])
     
-    for epoch in range(int(training_config['start_epoch']), int(training_config['epochs'])):
+    for epoch in range(start_epoch, epochs):
         # Train
-        if str(device) == 'xla':
-            import torch_xla.core.xla_model as xm
-            xm.optimizer_step(optimizer)
-            xm.mark_step()  # Important for TPU execution
         net.train()
-        train_loss = 0
-        for batch_idx, (data, target) in enumerate(train_loader):
-            data, target = data.to(device), target.to(device)
-            
+        total_loss = 0.0
+        start_time = time()
+        
+        for batch_idx, (encoder_inputs, labels) in enumerate(train_loader):
             optimizer.zero_grad()
-            output = net(data)
-            loss = criterion(output, target)
+            outputs = net(encoder_inputs)
+            loss = criterion(outputs, labels)
             loss.backward()
+            xm.optimizer_step(optimizer)
             
-            if is_tpu:
-                import torch_xla.core.xla_model as xm
-                xm.optimizer_step(optimizer, barrier=True)
-                xm.mark_step()
-            else:
-                optimizer.step()
-            
-            train_loss += loss.item()
-            
-            if batch_idx % 10 == 0:
-                print(f'Epoch {epoch} | Batch {batch_idx} | Loss: {loss.item():.4f}')
+            total_loss += loss.item()
+            if batch_idx % 100 == 0 and xm.is_master_ordinal():
+                print(f'Epoch {epoch} Batch {batch_idx} Loss: {loss.item():.4f}')
         
-        # Validate
-        val_loss = 0
+        # Validation
         net.eval()
+        val_loss = 0.0
         with torch.no_grad():
-            for data, target in val_loader:
-                data, target = data.to(device), target.to(device)
-                output = net(data)
-                loss = criterion(output, target)
-                val_loss += loss.item()
+            for encoder_inputs, labels in val_loader:
+                outputs = net(encoder_inputs)
+                val_loss += criterion(outputs, labels).item()
         
-        avg_train_loss = train_loss / len(train_loader)
         avg_val_loss = val_loss / len(val_loader)
-        
-        print(f'Epoch {epoch} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}')
-        
-        # Save best model
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            if is_tpu:
-                import torch_xla.core.xla_model as xm
-                xm.save(net.state_dict(), f'best_model_epoch_{epoch}.pt')
-            else:
-                torch.save(net.state_dict(), f'best_model_epoch_{epoch}.pt')
-            print(f'Saved new best model with val loss {best_val_loss:.4f}')
+        if xm.is_master_ordinal():
+            print(f'Epoch {epoch} Val Loss: {avg_val_loss:.4f} Time: {time()-start_time:.2f}s')
+            
+            # Save best model
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                best_epoch = epoch
+                xm.save(net.state_dict(), os.path.join(params_path, f'epoch_{epoch}.params'))
+    
+    # Final test on best model
+    if xm.is_master_ordinal():
+        net.load_state_dict(torch.load(os.path.join(params_path, f'epoch_{best_epoch}.params')))
+        net.eval()
+        test_loss = 0.0
+        with torch.no_grad():
+            for encoder_inputs, labels in test_loader:
+                outputs = net(encoder_inputs)
+                test_loss += criterion(outputs, labels).item()
+        print(f'Final Test Loss: {test_loss/len(test_loader):.4f}')
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default='configurations/PEMS04_dstagnn.conf', type=str,
+                       help="configuration file path")
+    args = parser.parse_args()
+    
+    # TPU-specific settings
+    torch.set_default_tensor_type('torch.FloatTensor')
+    xmp.spawn(_mp_fn, args=(args,), nprocs=8, start_method='fork')
