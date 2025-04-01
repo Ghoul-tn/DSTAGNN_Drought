@@ -228,33 +228,33 @@ class Embedding(nn.Module):
         super(Embedding, self).__init__()
         self.nb_seq = nb_seq
         self.Etype = Etype
+        self.num_of_features = num_of_features
         if Etype == 'T':
-            # For temporal embedding
-            self.pos_embed = nn.Embedding(nb_seq, d_Em)
-            self.norm = nn.LayerNorm(d_Em)
+            # Temporal embedding - handles [B, N, F, T]
+            self.pos_embed = nn.Embedding(nb_seq, d_Em)  # (T, d_Em)
+            self.feature_proj = nn.Linear(num_of_features, d_Em)  # Project features to embedding dim
         else:
-            # For spatial embedding
-            self.pos_embed = nn.Embedding(nb_seq, d_Em)
-            self.norm = nn.LayerNorm(d_Em)
+            # Spatial embedding - handles [B, N, d_model]
+            self.pos_embed = nn.Embedding(nb_seq, d_Em)  # (N, d_Em)
+        self.norm = nn.LayerNorm(d_Em)
 
     def forward(self, x, batch_size):
         if self.Etype == 'T':
-            # x shape: (B, N, F, T)
+            # x shape: [B, N, F, T]
             pos = torch.arange(x.size(3), dtype=torch.long).to(x.device)  # (T,)
             pos_embed = self.pos_embed(pos)  # (T, d_Em)
-            # Reshape to match input
-            pos_embed = pos_embed.permute(1, 0).unsqueeze(0).unsqueeze(0)  # (1, 1, d_Em, T)
-            pos_embed = pos_embed.expand(batch_size, x.size(1), -1, -1)  # (B, N, d_Em, T)
-            # Combine with input
-            embedding = x + pos_embed
+            
+            # Project features and combine
+            x_proj = self.feature_proj(x.permute(0, 1, 3, 2))  # [B, N, T, F] -> [B, N, T, d_Em]
+            embedding = x_proj + pos_embed.unsqueeze(0).unsqueeze(0)  # [B, N, T, d_Em]
+            embedding = embedding.permute(0, 1, 3, 2)  # [B, N, d_Em, T]
         else:
-            # x shape: (B, N, d_model)
+            # x shape: [B, N, d_model]
             pos = torch.arange(x.size(1), dtype=torch.long).to(x.device)  # (N,)
             pos_embed = self.pos_embed(pos)  # (N, d_model)
-            pos_embed = pos_embed.unsqueeze(0).expand(batch_size, -1, -1)  # (B, N, d_model)
-            embedding = x + pos_embed
+            embedding = x + pos_embed.unsqueeze(0)  # [B, N, d_model]
+            
         return self.norm(embedding)
-
 
 class GTU(nn.Module):
     def __init__(self, in_channels, time_strides, kernel_size):
@@ -289,7 +289,7 @@ class DSTAGNN_block(nn.Module):
 
         self.EmbedT = Embedding(num_of_timesteps, num_of_vertices, num_of_d, 'T')
         self.EmbedS = Embedding(num_of_vertices, d_model, num_of_d, 'S')
-
+                     
         self.TAt = MultiHeadAttention(DEVICE, num_of_vertices, d_k, d_v, n_heads, num_of_d)
         self.SAt = SMultiHeadAttention(DEVICE, d_model, d_k, d_v, K)
 
@@ -320,7 +320,8 @@ class DSTAGNN_block(nn.Module):
         assert num_of_timesteps == self.num_of_timesteps, \
             f"Input timesteps {num_of_timesteps} don't match configured {self.num_of_timesteps}"
         # TAT
-        TEmx = self.EmbedT(x, batch_size)  # Should output [B, F, T, N]
+        TEmx = self.EmbedT(x, batch_size)  # [B, N, d_Em, T]
+        TEmx = TEmx.permute(0, 2, 3, 1)  # [B, d_Em, T, N] for attention
         
         # Ensure proper dimensions for attention
         TATout, re_At = self.TAt(TEmx, TEmx, TEmx, None, res_att)  # [B, F, T, N]
