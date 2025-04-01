@@ -275,7 +275,7 @@ class DSTAGNN_block(nn.Module):
 
         self.adj_pa = torch.FloatTensor(adj_pa).cuda()
 
-        self.pre_conv = nn.Conv2d(144, d_model, kernel_size=(1, num_of_d))
+        self.pre_conv = nn.Conv2d(4, d_model, kernel_size=(1, num_of_d)) 
 
         self.EmbedT = Embedding(num_of_timesteps, num_of_vertices, num_of_d, 'T')
         self.EmbedS = Embedding(num_of_vertices, d_model, num_of_d, 'S')
@@ -309,14 +309,17 @@ class DSTAGNN_block(nn.Module):
         batch_size, num_of_vertices, num_of_features, num_of_timesteps = x.shape  # B,N,F,T
 
         # TAT
-        if num_of_features == 1:
-            TEmx = self.EmbedT(x, batch_size)  # B,F,T,N
-        else:
-            TEmx = x.permute(0, 2, 3, 1)
-        TATout, re_At = self.TAt(TEmx, TEmx, TEmx, None, res_att)  # B,F,T,N; B,F,Ht,T,T
-
-        x_TAt = self.pre_conv(TATout.permute(0, 3, 1, 2))[:, :, :, -1].permute(0, 2, 1) # B,N,d_model
-
+        TEmx = self.EmbedT(x, batch_size)  # Should output [B, F, T, N]
+        
+        # Ensure proper dimensions for attention
+        TATout, re_At = self.TAt(TEmx, TEmx, TEmx, None, res_att)  # [B, F, T, N]
+        
+        # Prepare for convolution - reshape to [B, C, H, W] = [B, 4, N, T]
+        conv_input = TATout.permute(0, 1, 3, 2)  # [B, F, N, T]
+        
+        # Apply convolution
+        x_TAt = self.pre_conv(conv_input)[:, :, :, -1]  # [B, d_model, N, 1]
+        x_TAt = x_TAt.squeeze(-1).permute(0, 2, 1)  # [B, N, d_model]
         # SAt
         SEmx_TAt = self.EmbedS(x_TAt, batch_size)  # B,N,d_model
         SEmx_TAt = self.dropout(SEmx_TAt)   # B,N,d_model
