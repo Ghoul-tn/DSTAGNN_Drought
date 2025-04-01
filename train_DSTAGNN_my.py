@@ -112,6 +112,10 @@ def main():
     
     for epoch in range(int(training_config['start_epoch']), int(training_config['epochs'])):
         # Train
+        if str(device) == 'xla':
+            import torch_xla.core.xla_model as xm
+            xm.optimizer_step(optimizer)
+            xm.mark_step()  # Important for TPU execution
         net.train()
         train_loss = 0
         for batch_idx, (data, target) in enumerate(train_loader):
