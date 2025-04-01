@@ -11,29 +11,17 @@ from model.DSTAGNN_my import make_model
 from lib.dataloader import load_weighted_adjacency_matrix, load_weighted_adjacency_matrix2, load_PA
 from lib.utils1 import load_graphdata_channel1, get_adjacency_matrix2, compute_val_loss_mstgcn, predict_and_save_results_mstgcn
 
-# Device setup
-def setup_device():
-    # Try TPU first
-    if 'COLAB_TPU_ADDR' in os.environ or 'TPU_NAME' in os.environ:
-        try:
-            import torch_xla
-            import torch_xla.core.xla_model as xm
-            device = xm.xla_device()
-            print('Using TPU:', device)
-            return device, 'tpu'
-        except ImportError:
-            print('TPU available but torch_xla not installed. Falling back to GPU/CPU.')
-    
-    # Try GPU next
-    if torch.cuda.is_available():
-        device = torch.device('cuda')
-        print('Using GPU:', device)
-        return device, 'gpu'
-    
-    # Fallback to CPU
-    device = torch.device('cpu')
-    print('Using CPU')
-    return device, 'cpu'
+# TPU setup
+def setup_tpu():
+    try:
+        import torch_xla
+        import torch_xla.core.xla_model as xm
+        device = xm.xla_device()
+        print('Using TPU:', device)
+        return device
+    except ImportError:
+        print('torch_xla not available. Falling back to CPU.')
+        return torch.device('cpu')
 
 def main():
     # Parse arguments
@@ -41,18 +29,18 @@ def main():
     parser.add_argument("--config", required=True, help="Configuration file path")
     args = parser.parse_args()
     
+    # Setup device - force TPU if available
+    device = setup_tpu()
+    
     # Load config
     config = configparser.ConfigParser()
     config.read(args.config)
     data_config = config['Data']
     training_config = config['Training']
     
-    # Setup device
-    device, device_type = setup_device()
-    
     # Load data
     print("Loading data...")
-    train_x_tensor, train_loader, train_target_tensor, val_x_tensor, val_loader, val_target_tensor, test_x_tensor, test_loader, test_target_tensor, mean, std  = load_graphdata_channel1(
+    train_x_tensor, train_loader, train_target_tensor, val_x_tensor, val_loader, val_target_tensor, test_x_tensor, test_loader, test_target_tensor, mean, std = load_graphdata_channel1(
         data_config['graph_signal_matrix_filename'],
         int(training_config['num_of_hours']),
         int(training_config['num_of_days']),
@@ -62,7 +50,7 @@ def main():
         shuffle=True
     )
     
-    # Load adjacency matrices
+    # Load adjacency matrices - modified for TPU
     print("Loading adjacency matrices...")
     adj_mx = get_adjacency_matrix2(
         data_config['adj_filename'], 
@@ -76,6 +64,17 @@ def main():
     )
     
     adj_pa = load_PA(data_config['strg_filename'])
+    
+    # Convert adjacency matrices to appropriate device
+    if str(device) == 'xla':
+        import torch_xla
+        adj_mx = torch.tensor(adj_mx, device=device)
+        adj_TMD = torch.tensor(adj_TMD, device=device)
+        adj_pa = torch.tensor(adj_pa, device=device)
+    else:
+        adj_mx = torch.FloatTensor(adj_mx).to(device)
+        adj_TMD = torch.FloatTensor(adj_TMD).to(device)
+        adj_pa = torch.FloatTensor(adj_pa).to(device)
     
     # Initialize model
     print("Initializing model...")
@@ -100,11 +99,6 @@ def main():
         int(training_config['n_heads'])
     ).to(device)
     
-    # Memory optimizations
-    if device_type == 'gpu':
-        net = net.half()  # Mixed precision for GPU
-        torch.backends.cudnn.benchmark = True
-    
     # Training setup
     optimizer = optim.Adam(net.parameters(), lr=float(training_config['learning_rate']))
     criterion = nn.SmoothL1Loss().to(device)
@@ -112,6 +106,7 @@ def main():
     # Training loop
     print("Starting training...")
     best_val_loss = float('inf')
+    
     for epoch in range(int(training_config['start_epoch']), int(training_config['epochs'])):
         # Train
         net.train()
@@ -120,25 +115,19 @@ def main():
             data, target = data.to(device), target.to(device)
             
             optimizer.zero_grad()
+            output = net(data)
+            loss = criterion(output, target)
+            loss.backward()
             
-            if device_type == 'gpu':
-                with torch.cuda.amp.autocast():
-                    output = net(data)
-                    loss = criterion(output, target)
-                
-                scaler = torch.cuda.amp.GradScaler()
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+            if str(device) == 'xla':
+                import torch_xla.core.xla_model as xm
+                xm.optimizer_step(optimizer)
             else:
-                output = net(data)
-                loss = criterion(output, target)
-                loss.backward()
                 optimizer.step()
             
             train_loss += loss.item()
             
-            if batch_idx % 100 == 0:
+            if batch_idx % 10 == 0:
                 print(f'Epoch {epoch} | Batch {batch_idx} | Loss: {loss.item():.4f}')
         
         # Validate
@@ -159,7 +148,11 @@ def main():
         # Save best model
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            torch.save(net.state_dict(), f'best_model_epoch_{epoch}.pt')
+            if str(device) == 'xla':
+                import torch_xla.core.xla_model as xm
+                xm.save(net.state_dict(), f'best_model_epoch_{epoch}.pt')
+            else:
+                torch.save(net.state_dict(), f'best_model_epoch_{epoch}.pt')
             print(f'Saved new best model with val loss {best_val_loss:.4f}')
 
 if __name__ == "__main__":
