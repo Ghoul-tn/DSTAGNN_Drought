@@ -149,26 +149,32 @@ def get_adjacency_matrix2(distance_df_filename, num_of_vertices,
 def scaled_Laplacian(W):
     '''
     compute \tilde{L}
-
     Parameters
     ----------
-    W: np.ndarray, shape is (N, N), N is the num of vertices
-
+    W: np.ndarray or torch.Tensor, shape is (N, N), N is the num of vertices
     Returns
     ----------
     scaled_Laplacian: np.ndarray, shape (N, N)
-
     '''
+    # Convert to numpy if it's a tensor
+    if torch.is_tensor(W):
+        device = W.device
+        W_np = W.cpu().numpy()
+    else:
+        W_np = W
+    
+    assert W_np.shape[0] == W_np.shape[1]
 
-    assert W.shape[0] == W.shape[1]
-
-    D = np.diag(np.sum(W, axis=1))
-
-    L = D - W
-
+    D = np.diag(np.sum(W_np, axis=1))
+    L = D - W_np
     lambda_max = eigs(L, k=1, which='LR')[0].real
 
-    return (2 * L) / lambda_max - np.identity(W.shape[0])
+    L_tilde = (2 * L) / lambda_max - np.identity(W_np.shape[0])
+    
+    # Convert back to tensor if input was tensor
+    if torch.is_tensor(W):
+        return torch.from_numpy(L_tilde).float().to(device)
+    return L_tilde
 
 
 def cheb_polynomial(L_tilde, K):
