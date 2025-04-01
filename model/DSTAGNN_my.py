@@ -423,21 +423,14 @@ class DSTAGNN_submodule(nn.Module):
 def make_model(DEVICE, num_of_d, nb_block, in_channels, K,
                nb_chev_filter, nb_time_filter, time_strides, adj_mx, adj_pa,
                adj_TMD, num_for_predict, len_input, num_of_vertices, d_model, d_k, d_v, n_heads):
-    '''
-
-    :param DEVICE:
-    :param nb_block:
-    :param in_channels:
-    :param K:
-    :param nb_chev_filter:
-    :param nb_time_filter:
-    :param time_strides:
-    :param num_for_predict:
-    :param len_input
-    :return:
-    '''
-    L_tilde = scaled_Laplacian(adj_mx)
-    cheb_polynomials = [torch.from_numpy(i).type(torch.FloatTensor).to(DEVICE) for i in cheb_polynomial(L_tilde, K)]
+    
+    # Convert adjacency matrices to numpy if they're tensors
+    adj_mx_np = adj_mx.cpu().numpy() if torch.is_tensor(adj_mx) else adj_mx
+    L_tilde = scaled_Laplacian(adj_mx_np)
+    
+    # Convert back to tensor on correct device
+    cheb_polynomials = [torch.from_numpy(i).float().to(DEVICE) for i in cheb_polynomial(L_tilde, K)]
+    
     model = DSTAGNN_submodule(DEVICE, num_of_d, nb_block, in_channels,
                              K, nb_chev_filter, nb_time_filter, time_strides, cheb_polynomials,
                              adj_pa, adj_TMD, num_for_predict, len_input, num_of_vertices, d_model, d_k, d_v, n_heads)
