@@ -231,11 +231,11 @@ class Embedding(nn.Module):
         self.num_of_features = num_of_features
         
         if Etype == 'T':
-            # Temporal embedding (applied to time dimension)
+            # Temporal embedding (time dimension)
             self.pos_embed = nn.Embedding(nb_seq, d_Em)
-            self.norm = nn.LayerNorm(d_Em)
+            self.norm = nn.LayerNorm([num_of_features, d_Em])  # Normalize over feature and embedding dims
         else:
-            # Spatial embedding (applied to node dimension)
+            # Spatial embedding (node dimension)
             self.pos_embed = nn.Embedding(nb_seq, d_Em)
             self.norm = nn.LayerNorm(d_Em)
 
@@ -245,22 +245,27 @@ class Embedding(nn.Module):
             pos = torch.arange(x.size(3), dtype=torch.long).to(x.device)  # (T,)
             pos_embed = self.pos_embed(pos)  # (T, d_Em)
             
-            # Reshape for broadcasting: (1, 1, d_Em, T)
+            # Reshape for proper broadcasting: (1, 1, d_Em, T)
             pos_embed = pos_embed.permute(1, 0).unsqueeze(0).unsqueeze(0)
             
-            # Add to input (after permuting x to match dimensions)
+            # Permute x to match dimensions: (B, N, d_Em, T)
             x_permuted = x.permute(0, 1, 3, 2)  # (B, N, T, F)
-            embedding = x_permuted + pos_embed
+            x_permuted = x_permuted.unsqueeze(2).expand(-1, -1, pos_embed.size(2), -1, -1)  # (B, N, d_Em, T, F)
             
-            # Normalize over feature dimension
-            return self.norm(embedding).permute(0, 1, 3, 2)  # Back to (B, N, F, T)
+            # Add positional embedding (broadcast correctly)
+            embedding = x_permuted + pos_embed.unsqueeze(-1)  # (B, N, d_Em, T, F)
+            
+            # Combine dimensions and normalize
+            embedding = embedding.permute(0, 1, 4, 3, 2)  # (B, N, F, T, d_Em)
+            embedding = embedding.reshape(batch_size, -1, self.num_of_features, embedding.size(3))
+            return self.norm(embedding)
             
         else:
             # x shape: (B, N, d_model)
             pos = torch.arange(x.size(1), dtype=torch.long).to(x.device)  # (N,)
             pos_embed = self.pos_embed(pos)  # (N, d_model)
             
-            # Add to input
+            # Add and normalize
             embedding = x + pos_embed.unsqueeze(0)  # (B, N, d_model)
             return self.norm(embedding)
 
