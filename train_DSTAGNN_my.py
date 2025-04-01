@@ -47,21 +47,16 @@ def main():
     # Set seed
     seed_torch(1)
 
-    # Load data
-    train_x_tensor, train_loader, train_target_tensor, val_x_tensor, val_loader, val_target_tensor, test_x_tensor, test_loader, test_target_tensor, mean, std  = load_graphdata_channel1(
+    # Load data - keep on CPU initially
+    train_x_tensor, train_loader, train_target_tensor, val_x_tensor, val_loader, val_target_tensor, test_x_tensor, test_loader, test_target_tensor, mean, std = load_graphdata_channel1(
         data_config['graph_signal_matrix_filename'],
         int(training_config['num_of_hours']),
         int(training_config['num_of_days']),
         int(training_config['num_of_weeks']),
-        device,
+        'cpu',  # Load to CPU first
         int(training_config['batch_size']))
     
-    # Convert to parallel loaders
-    train_loader = pl.MpDeviceLoader(train_loader, device)
-    val_loader = pl.MpDeviceLoader(val_loader, device)
-    test_loader = pl.MpDeviceLoader(test_loader, device)
-
-    # Load adjacency matrices
+    # Load adjacency matrices on CPU
     if data_config['dataset_name'] in ['PEMS04', 'PEMS08', 'PEMS07', 'PEMS03']:
         adj_mx = get_adjacency_matrix2(data_config['adj_filename'], 
                                      int(data_config['num_of_vertices']), 
@@ -74,12 +69,18 @@ def main():
                                            int(data_config['num_of_vertices']))
     adj_pa = load_PA(data_config['strg_filename'])
 
-    # Model setup
+    # Convert numpy arrays to torch tensors on CPU first
+    adj_mx = torch.FloatTensor(adj_mx)
+    adj_TMD = torch.FloatTensor(adj_TMD)
+    adj_pa = torch.FloatTensor(adj_pa)
+
+    # Model setup - move to TPU after initialization
     graph_use = training_config['graph']
     adj_merge = adj_mx if graph_use == 'G' else adj_TMD
     
+    # Initialize model on CPU first
     net = make_model(
-        device,
+        'cpu',  # Initialize on CPU
         int(training_config['in_channels']),
         int(training_config['nb_block']),
         int(training_config['in_channels']),
@@ -99,6 +100,17 @@ def main():
         int(training_config['n_heads'])
     )
     
+    # Move model and data to TPU device
+    net = net.to(device)
+    train_target_tensor = train_target_tensor.to(device)
+    val_target_tensor = val_target_tensor.to(device)
+    test_target_tensor = test_target_tensor.to(device)
+    
+    # Convert to parallel loaders
+    train_loader = pl.MpDeviceLoader(train_loader, device)
+    val_loader = pl.MpDeviceLoader(val_loader, device)
+    test_loader = pl.MpDeviceLoader(test_loader, device)
+
     # Training setup
     folder_dir = '{}_{}h{}d{}w_channel{}_{}'.format(
         training_config['model_name'],
