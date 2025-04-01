@@ -283,8 +283,8 @@ class DSTAGNN_block(nn.Module):
         self.tanh = nn.Tanh()
         self.relu = nn.ReLU(inplace=True)
         self.num_of_timesteps = num_of_timesteps
-        self.adj_pa = torch.FloatTensor(adj_pa).cuda()
-
+        self.adj_pa = torch.FloatTensor(adj_pa).to(DEVICE)
+        self.adj_TMD = torch.FloatTensor(adj_TMD).to(DEVICE)
         self.pre_conv = nn.Conv2d(num_of_d, d_model, kernel_size=(1, num_of_timesteps)) 
 
         self.EmbedT = Embedding(num_of_timesteps, num_of_vertices, num_of_d, 'T')
@@ -424,11 +424,19 @@ def make_model(DEVICE, num_of_d, nb_block, in_channels, K,
                nb_chev_filter, nb_time_filter, time_strides, adj_mx, adj_pa,
                adj_TMD, num_for_predict, len_input, num_of_vertices, d_model, d_k, d_v, n_heads):
     
-    # Convert adjacency matrices to numpy if they're tensors
+    # Convert adjacency matrices to proper tensors
+    if not torch.is_tensor(adj_mx):
+        adj_mx = torch.FloatTensor(adj_mx).to(DEVICE)
+    if not torch.is_tensor(adj_pa):
+        adj_pa = torch.FloatTensor(adj_pa).to(DEVICE)
+    if not torch.is_tensor(adj_TMD):
+        adj_TMD = torch.FloatTensor(adj_TMD).to(DEVICE)
+    
+    # Compute Laplacian
     adj_mx_np = adj_mx.cpu().numpy() if torch.is_tensor(adj_mx) else adj_mx
     L_tilde = scaled_Laplacian(adj_mx_np)
     
-    # Convert back to tensor on correct device
+    # Convert polynomials to device
     cheb_polynomials = [torch.from_numpy(i).float().to(DEVICE) for i in cheb_polynomial(L_tilde, K)]
     
     model = DSTAGNN_submodule(DEVICE, num_of_d, nb_block, in_channels,
