@@ -292,51 +292,51 @@ def calculate_laplacian_matrix(adj_mat, mat_type):
 
 
 def load_graphdata_channel1(graph_signal_matrix_filename, num_of_hours, num_of_days, num_of_weeks, DEVICE, batch_size, shuffle=True):
-    file = os.path.basename(graph_signal_matrix_filename).split('.')[0]
-    dirpath = os.path.dirname(graph_signal_matrix_filename)
-    filename = os.path.join(dirpath, file + '_r' + str(num_of_hours) + '_d' + str(num_of_days) + '_w' + str(num_of_weeks)) +'_dstagnn'
-
-    print('load file:', filename)
-    file_data = np.load(filename + '.npz')
+    '''
+    Modified version for drought prediction data
+    Returns DataLoaders for train/val/test sets
+    '''
+    # Load the npz file
+    data = np.load(graph_signal_matrix_filename)
     
-    # Keep all features
+    # Extract all features (NDVI, SoilMoisture, LST, SPI)
+    train_x = data['train_x']  # shape: (B, N, F, T)
+    train_target = data['train_target']  # shape: (B, N, T) - assuming SPI is the target
+    
+    val_x = data['val_x']
+    val_target = data['val_target']
+    
+    test_x = data['test_x']
+    test_target = data['test_target']
+    
+    mean = data['mean']  # shape: (1, 1, F, 1)
+    std = data['std']    # shape: (1, 1, F, 1)
+
+    # Convert to tensors and move to device
     train_x_tensor = torch.from_numpy(train_x).float().to(DEVICE)
     train_target_tensor = torch.from_numpy(train_target).float().to(DEVICE)
     
-    val_x = file_data['val_x']
-    val_target = file_data['val_target']
+    val_x_tensor = torch.from_numpy(val_x).float().to(DEVICE)
+    val_target_tensor = torch.from_numpy(val_target).float().to(DEVICE)
+    
+    test_x_tensor = torch.from_numpy(test_x).float().to(DEVICE)
+    test_target_tensor = torch.from_numpy(test_target).float().to(DEVICE)
 
-    test_x = file_data['test_x']
-    test_target = file_data['test_target']
-
-    mean = file_data['mean']
-    std = file_data['std']
-
-    # Convert to tensors
-    train_x_tensor = torch.from_numpy(train_x).type(torch.FloatTensor).to(DEVICE)
-    train_target_tensor = torch.from_numpy(train_target).type(torch.FloatTensor).to(DEVICE)
-
-    val_x_tensor = torch.from_numpy(val_x).type(torch.FloatTensor).to(DEVICE)
-    val_target_tensor = torch.from_numpy(val_target).type(torch.FloatTensor).to(DEVICE)
-
-    test_x_tensor = torch.from_numpy(test_x).type(torch.FloatTensor).to(DEVICE)
-    test_target_tensor = torch.from_numpy(test_target).type(torch.FloatTensor).to(DEVICE)
-
-    # Create DataLoaders
+    # Create datasets and dataloaders
     train_dataset = torch.utils.data.TensorDataset(train_x_tensor, train_target_tensor)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle)
-
+    
     val_dataset = torch.utils.data.TensorDataset(val_x_tensor, val_target_tensor)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-
+    
     test_dataset = torch.utils.data.TensorDataset(test_x_tensor, test_target_tensor)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-    print('train:', train_x_tensor.size(), train_target_tensor.size())
-    print('val:', val_x_tensor.size(), val_target_tensor.size())
-    print('test:', test_x_tensor.size(), test_target_tensor.size())
+    print('Data shapes:')
+    print('Train:', train_x_tensor.shape, train_target_tensor.shape)
+    print('Val:', val_x_tensor.shape, val_target_tensor.shape)
+    print('Test:', test_x_tensor.shape, test_target_tensor.shape)
 
-    # Return all expected values
     return (train_x_tensor, train_loader, train_target_tensor,
             val_x_tensor, val_loader, val_target_tensor,
             test_x_tensor, test_loader, test_target_tensor,
