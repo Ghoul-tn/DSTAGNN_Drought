@@ -275,7 +275,7 @@ class DSTAGNN_block(nn.Module):
 
         self.adj_pa = torch.FloatTensor(adj_pa).cuda()
 
-        self.pre_conv = nn.Conv2d(num_of_timesteps, d_model, kernel_size=(1, num_of_d))
+        self.pre_conv = nn.Conv2d(144, d_model, kernel_size=(1, num_of_d))
 
         self.EmbedT = Embedding(num_of_timesteps, num_of_vertices, num_of_d, 'T')
         self.EmbedS = Embedding(num_of_vertices, d_model, num_of_d, 'S')
@@ -315,7 +315,7 @@ class DSTAGNN_block(nn.Module):
             TEmx = x.permute(0, 2, 3, 1)
         TATout, re_At = self.TAt(TEmx, TEmx, TEmx, None, res_att)  # B,F,T,N; B,F,Ht,T,T
 
-        x_TAt = self.pre_conv(TATout.permute(0, 2, 3, 1))[:, :, :, -1].permute(0, 2, 1)  # B,N,d_model
+        x_TAt = self.pre_conv(TATout.permute(0, 3, 1, 2))[:, :, :, -1].permute(0, 2, 1) # B,N,d_model
 
         # SAt
         SEmx_TAt = self.EmbedS(x_TAt, batch_size)  # B,N,d_model
