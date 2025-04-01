@@ -9,19 +9,28 @@ import configparser
 from time import time
 from model.DSTAGNN_my import make_model
 from lib.dataloader import load_weighted_adjacency_matrix, load_weighted_adjacency_matrix2, load_PA
-from lib.utils1 import load_graphdata_channel1, get_adjacency_matrix2, compute_val_loss_mstgcn, predict_and_save_results_mstgcn
+from lib.utils1 import load_graphdata_channel1, get_adjacency_matrix2
 
-# TPU setup
 def setup_tpu():
     try:
         import torch_xla
         import torch_xla.core.xla_model as xm
         device = xm.xla_device()
         print('Using TPU:', device)
-        return device
+        return device, True
     except ImportError:
-        print('torch_xla not available. Falling back to CPU.')
-        return torch.device('cpu')
+        print('torch_xla not available. Falling back to CPU/GPU.')
+        return torch.device('cuda' if torch.cuda.is_available() else 'cpu'), False
+
+def convert_adjacency_matrix(matrix, device):
+    """Convert adjacency matrix to proper tensor format for the target device"""
+    if isinstance(matrix, np.ndarray):
+        matrix = torch.FloatTensor(matrix)
+    elif isinstance(matrix, torch.Tensor):
+        matrix = matrix.float()
+    else:
+        raise ValueError("Unsupported matrix type")
+    return matrix.to(device)
 
 def main():
     # Parse arguments
@@ -29,8 +38,8 @@ def main():
     parser.add_argument("--config", required=True, help="Configuration file path")
     args = parser.parse_args()
     
-    # Setup device - force TPU if available
-    device = setup_tpu()
+    # Setup device
+    device, is_tpu = setup_tpu()
     
     # Load config
     config = configparser.ConfigParser()
@@ -40,7 +49,7 @@ def main():
     
     # Load data
     print("Loading data...")
-    train_x_tensor, train_loader, train_target_tensor, val_x_tensor, val_loader, val_target_tensor, test_x_tensor, test_loader, test_target_tensor, mean, std = load_graphdata_channel1(
+    train_x_tensor, train_loader, train_target_tensor, val_x_tensor, val_loader, val_target_tensor, test_x_tensor, test_loader, test_target_tensor, mean, std  = load_graphdata_channel1(
         data_config['graph_signal_matrix_filename'],
         int(training_config['num_of_hours']),
         int(training_config['num_of_days']),
@@ -50,7 +59,7 @@ def main():
         shuffle=True
     )
     
-    # Load adjacency matrices - modified for TPU
+    # Load and convert adjacency matrices
     print("Loading adjacency matrices...")
     adj_mx = get_adjacency_matrix2(
         data_config['adj_filename'], 
@@ -65,16 +74,10 @@ def main():
     
     adj_pa = load_PA(data_config['strg_filename'])
     
-    # Convert adjacency matrices to appropriate device
-    if str(device) == 'xla':
-        import torch_xla
-        adj_mx = torch.tensor(adj_mx, device=device)
-        adj_TMD = torch.tensor(adj_TMD, device=device)
-        adj_pa = torch.tensor(adj_pa, device=device)
-    else:
-        adj_mx = torch.FloatTensor(adj_mx).to(device)
-        adj_TMD = torch.FloatTensor(adj_TMD).to(device)
-        adj_pa = torch.FloatTensor(adj_pa).to(device)
+    # Convert to tensors and move to device
+    adj_mx = convert_adjacency_matrix(adj_mx, device)
+    adj_TMD = convert_adjacency_matrix(adj_TMD, device)
+    adj_pa = convert_adjacency_matrix(adj_pa, device)
     
     # Initialize model
     print("Initializing model...")
@@ -119,9 +122,10 @@ def main():
             loss = criterion(output, target)
             loss.backward()
             
-            if str(device) == 'xla':
+            if is_tpu:
                 import torch_xla.core.xla_model as xm
-                xm.optimizer_step(optimizer)
+                xm.optimizer_step(optimizer, barrier=True)
+                xm.mark_step()
             else:
                 optimizer.step()
             
@@ -148,7 +152,7 @@ def main():
         # Save best model
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            if str(device) == 'xla':
+            if is_tpu:
                 import torch_xla.core.xla_model as xm
                 xm.save(net.state_dict(), f'best_model_epoch_{epoch}.pt')
             else:
