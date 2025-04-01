@@ -300,8 +300,8 @@ def load_graphdata_channel1(graph_signal_matrix_filename, num_of_hours, num_of_d
     file_data = np.load(filename + '.npz')
     
     # Keep all features
-    train_x = file_data['train_x']  # (B, N, F, T)
-    train_target = file_data['train_target']  # (B, N, T)
+    train_x_tensor = torch.from_numpy(train_x).float().to(DEVICE)
+    train_target_tensor = torch.from_numpy(train_target).float().to(DEVICE)
     
     val_x = file_data['val_x']
     val_target = file_data['val_target']
