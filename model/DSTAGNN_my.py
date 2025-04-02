@@ -317,19 +317,16 @@ class GTU(nn.Module):
 class DSTAGNN_block(nn.Module):
     def __init__(self, DEVICE, num_of_d, in_channels, K, nb_chev_filter, nb_time_filter, time_strides,
                  cheb_polynomials, adj_pa, adj_TMD, num_of_vertices, num_of_timesteps, d_model, d_k, d_v, n_heads):
-        super(DSTAGNN_block, self).__init__()
-        assert num_of_vertices == 2139, "Graph size mismatch"
-        assert num_of_timesteps == 144, "Sequence length mismatch"      
-        # Initialize with safe defaults
+        super().__init__()
+        # Safe initialization
         self.d_model = min(d_model, 64)
         self.n_heads = min(n_heads, 2)
         self.d_k = min(d_k, 32)
         self.d_v = min(d_v, 32)
-        self.num_of_vertices = num_of_vertices
-        self.num_of_timesteps = num_of_timesteps
-        # Properly register buffers for TPU
-        self.register_buffer('adj_pa', torch.FloatTensor(adj_pa))
-        self.register_buffer('adj_TMD', torch.FloatTensor(adj_TMD))
+        
+        # Register buffers properly for TPU
+        self.register_buffer('adj_pa', torch.FloatTensor(adj_pa).to(DEVICE))
+        self.register_buffer('adj_TMD', torch.FloatTensor(adj_TMD).to(DEVICE))
         
         # Temporal processing
         self.temporal_proj = nn.Sequential(
@@ -345,7 +342,7 @@ class DSTAGNN_block(nn.Module):
             DEVICE, self.d_model, self.d_k, self.d_v, K
         )
         
-        # Convolutional layers
+        # Chebyshev convolution
         self.cheb_conv = cheb_conv_withSAt(
             K, cheb_polynomials, in_channels, 
             min(nb_chev_filter, 32),
@@ -354,7 +351,7 @@ class DSTAGNN_block(nn.Module):
         
         # GTU layers
         self.gtu3 = GTU(nb_time_filter, time_strides, 3)
-        self.gtu5 = GTU(nb_time_filter, time_strides, 5) 
+        self.gtu5 = GTU(nb_time_filter, time_strides, 5)
         self.gtu7 = GTU(nb_time_filter, time_strides, 7)
         
         # Residual connection
@@ -363,29 +360,10 @@ class DSTAGNN_block(nn.Module):
 
     def forward(self, x, res_att):
         B, N, F, T = x.shape
-        # assert num_of_timesteps == self.num_of_timesteps, \
-        #     f"Input timesteps {num_of_timesteps} don't match configured {self.num_of_timesteps}"
-        print(f"Input shape: {x.shape}")
-        # assert x.shape[1] == self.num_of_vertices
-        # assert x.shape[2] == num_of_features
-        # assert x.shape[3] == self.num_of_timesteps
-        print(f"Input device: {x.device}")
-        print(f"Model device: {next(self.parameters()).device}")
-        assert x.is_contiguous(), "Input not contiguous"
-        print(f"Input stats - mean: {x.mean().item():.3f}, std: {x.std().item():.3f}")
-                
-    
-    
-        # Initialize res_att properly if it's the first block
-        if isinstance(res_att, int):
-            res_att = torch.zeros(
-                batch_size, num_of_features, num_of_vertices, self.d_model,
-                device=x.device, dtype=x.dtype
-            )
         
         # 1. Temporal projection
         x_temp = x.permute(0,1,3,2)  # [B,N,T,F]
-        x_temp = self.temporal_proj(x_temp.reshape(-1,T)).view(B,N,F,-1)
+        x_temp = self.temporal_proj(x_temp.reshape(-1,T)).view(B,N,F,self.d_model)
         
         # 2. Temporal attention
         temp_out, temp_att = self.temporal_att(
@@ -394,7 +372,11 @@ class DSTAGNN_block(nn.Module):
         )
         
         # 3. Spatial attention
-        spatial_att = self.spatial_att(temp_out, temp_out, None)
+        spatial_att = self.spatial_att(
+            temp_out.reshape(-1,N,self.d_model), 
+            temp_out.reshape(-1,N,self.d_model), 
+            None
+        )
         
         # 4. Chebyshev convolution
         x_conv = x.permute(0,2,1,3)  # [B,F,N,T]
@@ -439,23 +421,35 @@ class DSTAGNN_submodule(nn.Module):
             in_ch = nb_time_filter
         
         # Final projection
-        self.final_proj = nn.Sequential(
-            nn.Linear(nb_time_filter * self.num_blocks, 128),
-            nn.Linear(128, num_for_predict)
-        )
+        self.final_conv = nn.Conv2d(nb_time_filter, 128, kernel_size=(1,1))
+        self.final_fc = nn.Linear(128, num_for_predict)
 
     def forward(self, x):
         B, N, F, T = x.shape
         outputs = []
-        res_att = torch.zeros(B, F, N, 64, device=x.device)  # Adjusted for safe dims
+        res_att = torch.zeros(B, F, N, 64, device=x.device)
         
         for block in self.blocks:
             x, res_att = block(x, res_att)
-            outputs.append(x.mean(dim=-1))  # Reduce time dimension
+            outputs.append(x)
             
-        # Combine features
-        features = torch.cat(outputs, dim=-1)
-        return self.final_proj(features)
+            # TPU synchronization
+            xm.mark_step()
+        
+        # Ensure we have outputs to concatenate
+        if not outputs:
+            raise ValueError("No outputs from blocks to concatenate")
+            
+        # Take only the last output (simplified)
+        final_output = outputs[-1]
+        
+        # Final projection
+        output = final_output.permute(0,3,1,2)  # [B,T,N,F]
+        output = self.final_conv(output)  # [B,128,N,F]
+        output = output.mean(dim=-1)  # [B,128,N]
+        output = self.final_fc(output.permute(0,2,1))  # [B,N,num_for_predict]
+        
+        return output
 def make_model(DEVICE, num_of_d, nb_block, in_channels, K,
                nb_chev_filter, nb_time_filter, time_strides, adj_mx, adj_pa,
                adj_TMD, num_for_predict, len_input, num_of_vertices, d_model, d_k, d_v, n_heads):
