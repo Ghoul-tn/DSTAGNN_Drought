@@ -325,7 +325,8 @@ class DSTAGNN_block(nn.Module):
         self.n_heads = min(n_heads, 2)
         self.d_k = min(d_k, 32)
         self.d_v = min(d_v, 32)
-        
+        self.num_of_vertices = num_of_vertices
+        self.num_of_timesteps = num_of_timesteps
         # Properly register buffers for TPU
         self.register_buffer('adj_pa', torch.FloatTensor(adj_pa))
         self.register_buffer('adj_TMD', torch.FloatTensor(adj_TMD))
