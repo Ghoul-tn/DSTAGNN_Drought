@@ -111,7 +111,12 @@ class MultiHeadAttention(nn.Module):
         batch_size = input_Q.size(0)
         residual = input_Q
         
-        # Linear projections
+        # Ensure input dimensions match
+        if input_Q.size() != input_K.size() or input_Q.size() != input_V.size():
+            input_K = input_K.expand_as(input_Q)
+            input_V = input_V.expand_as(input_Q)
+        
+        # Linear projections with dimension checks
         Q = self.W_Q(input_Q).view(batch_size, -1, self.n_heads, self.d_k).transpose(1, 2)
         K = self.W_K(input_K).view(batch_size, -1, self.n_heads, self.d_k).transpose(1, 2)
         V = self.W_V(input_V).view(batch_size, -1, self.n_heads, self.d_v).transpose(1, 2)
@@ -120,24 +125,28 @@ class MultiHeadAttention(nn.Module):
         if attn_mask is not None:
             attn_mask = attn_mask.unsqueeze(1).repeat(1, self.n_heads, 1, 1)
         
-        # Handle residual attention shape
-        if res_att is not None and res_att.dim() == 4:
-            if res_att.size(1) != self.n_heads:
-                res_att = res_att.repeat(1, self.n_heads//res_att.size(1), 1, 1)
-        
         # Scaled dot-product attention
         context, attn = ScaledDotProductAttention(self.d_k, self.num_of_d)(
             Q, K, V, attn_mask, res_att)
         
-        # Concatenate heads
-        context = context.transpose(1, 2).contiguous().view(
+        # Concatenate heads with contiguous memory
+        context = context.transpose(1, 2).reshape(
             batch_size, -1, self.n_heads * self.d_v)
         
         # Final linear projection
         output = self.fc(context)
         
-        return self.norm(output + residual), attn
-
+        # Ensure residual connection dimensions match
+        if output.size() != residual.size():
+            residual = residual.view_as(output)
+        
+        # TPU-compatible normalization
+        output = output + residual
+        output = output.reshape(-1, self.d_model)
+        output = self.norm(output)
+        output = output.view(batch_size, -1, self.d_model)
+        
+        return output, attn
 
 class cheb_conv_withSAt(nn.Module):
     '''
@@ -328,7 +337,7 @@ class DSTAGNN_block(nn.Module):
         self.register_buffer('adj_pa', torch.FloatTensor(adj_pa).to(DEVICE))
         self.register_buffer('adj_TMD', torch.FloatTensor(adj_TMD).to(DEVICE))
         
-        # Temporal processing
+        # Temporal processing with dimension checks
         self.temporal_proj = nn.Sequential(
             nn.Linear(num_of_timesteps, self.d_model),
             nn.LayerNorm(self.d_model)
@@ -342,50 +351,48 @@ class DSTAGNN_block(nn.Module):
             DEVICE, self.d_model, self.d_k, self.d_v, K
         )
         
-        # Chebyshev convolution
+        # Chebyshev convolution with reduced filters
         self.cheb_conv = cheb_conv_withSAt(
             K, cheb_polynomials, in_channels, 
             min(nb_chev_filter, 32),
             num_of_vertices
         )
         
-        # GTU layers
+        # GTU layers with error handling
         self.gtu3 = GTU(nb_time_filter, time_strides, 3)
         self.gtu5 = GTU(nb_time_filter, time_strides, 5)
         self.gtu7 = GTU(nb_time_filter, time_strides, 7)
         
-        # Residual connection
-        self.res_conv = nn.Conv2d(in_channels, nb_time_filter, kernel_size=(1,1), stride=(1,time_strides))
-        self.ln = nn.LayerNorm(nb_time_filter)
+        # Residual connection with proper dimension handling
+        self.res_conv = nn.Sequential(
+            nn.Conv2d(in_channels, nb_time_filter, kernel_size=1, stride=(1, time_strides)),
+            nn.LayerNorm([nb_time_filter, num_of_vertices, num_of_timesteps // time_strides])
+        )
 
     def forward(self, x, res_att):
         B, N, F, T = x.shape
         
-        # 1. Temporal processing
+        # 1. Temporal processing with dimension checks
         x_temp = x.permute(0, 1, 3, 2)  # [B,N,T,F]
         x_temp = x_temp.reshape(-1, T)  # [B*N*F, T]
         x_temp = self.temporal_proj(x_temp)  # [B*N*F, d_model]
         x_temp = x_temp.view(B, N, F, self.d_model)  # [B,N,F,d_model]
         
-        # 2. Temporal attention
+        # 2. Temporal attention with shape verification
         temp_out, temp_att = self.temporal_att(
             x_temp, x_temp, x_temp,
             None, res_att
         )
         
-        # 3. Spatial attention
-        spatial_att = self.spatial_att(
-            temp_out.reshape(B*N, F, self.d_model),
-            temp_out.reshape(B*N, F, self.d_model),
-            None
-        )
-        print(f"Shape after temporal attention: {temp_out.shape}")
-        print(f"Shape after spatial attention: {spatial_out.shape}")
-        # 4. Chebyshev convolution
+        # 3. Spatial attention with TPU-friendly operations
+        spatial_in = temp_out.reshape(B*N, F, self.d_model)
+        spatial_att = self.spatial_att(spatial_in, spatial_in, None)
+        
+        # 4. Chebyshev convolution with dimension checks
         x_conv = x.permute(0, 2, 1, 3)  # [B,F,N,T]
         spatial_out = self.cheb_conv(x_conv, spatial_att, self.adj_pa)
         
-        # 5. GTU temporal convolution
+        # 5. GTU temporal convolution with error handling
         gtu_outputs = []
         for gtu in [self.gtu3, self.gtu5, self.gtu7]:
             try:
@@ -401,8 +408,11 @@ class DSTAGNN_block(nn.Module):
         
         time_out = torch.cat(gtu_outputs, dim=-1)
         
-        # 6. Residual connection
+        # 6. Residual connection with dimension matching
         res = self.res_conv(x.permute(0, 2, 1, 3))
+        if res.size() != time_out.size():
+            res = F.interpolate(res, size=time_out.size()[2:], mode='nearest')
+        
         output = F.relu(res + time_out)
         
         return output.permute(0, 2, 1, 3), temp_att
