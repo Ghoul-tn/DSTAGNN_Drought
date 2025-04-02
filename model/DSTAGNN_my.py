@@ -349,7 +349,8 @@ def forward(self, x, res_att):
     print(f"Input device: {x.device}")
     print(f"Model device: {next(self.parameters()).device}")
     assert x.is_contiguous(), "Input not contiguous"
-        
+    print(f"Input stats - mean: {x.mean().item():.3f}, std: {x.std().item():.3f}")
+            
 
 
     # Initialize res_att properly if it's the first block
