@@ -26,36 +26,39 @@ class SScaledDotProductAttention(nn.Module):
 
 class ScaledDotProductAttention(nn.Module):
     def __init__(self, d_k, num_of_d):
-        super(ScaledDotProductAttention, self).__init__()
+        super().__init__()
         self.d_k = d_k
         self.num_of_d = num_of_d
+        self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, Q, K, V, attn_mask, res_att):
-        '''
+        """
         Q: [batch_size, num_of_d, n_heads, len_q, d_k]
         K: [batch_size, num_of_d, n_heads, len_k, d_k]
-        V: [batch_size, num_of_d, n_heads, len_v(=len_k), d_v]
-        attn_mask: [batch_size, n_heads, seq_len, seq_len]
+        V: [batch_size, num_of_d, n_heads, len_v, d_v]
         res_att: [batch_size, num_of_d, n_heads, len_q, len_k]
-        '''
-        # Ensure res_att has proper shape
-        if res_att.dim() == 4:
-            res_att = res_att.unsqueeze(1)  # Add num_of_d dimension if missing
-        
-        # Matmul with proper dimension ordering
-        scores = torch.matmul(Q, K.transpose(-1, -2)) / np.sqrt(self.d_k)  # [B, D, H, T, T]
+        """
+        # Compute attention scores
+        scores = torch.matmul(Q, K.transpose(-1, -2)) / np.sqrt(self.d_k)
         
         # Add residual attention if provided
         if res_att is not None:
+            # Ensure res_att has the same shape as scores
+            if res_att.shape != scores.shape:
+                res_att = res_att.expand_as(scores)
             scores = scores + res_att
         
+        # Apply mask if provided
         if attn_mask is not None:
             scores.masked_fill_(attn_mask, -1e9)
             
-        attn = F.softmax(scores, dim=-1)
+        # Compute attention weights
+        attn = self.softmax(scores)
+        
+        # Compute context
         context = torch.matmul(attn, V)
         
-        return context, scores
+        return context, attn
 
 class SMultiHeadAttention(nn.Module):
     def __init__(self, DEVICE, d_model, d_k ,d_v, n_heads):
@@ -88,7 +91,7 @@ class SMultiHeadAttention(nn.Module):
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, DEVICE, d_model, d_k, d_v, n_heads, num_of_d):
-        super(MultiHeadAttention, self).__init__()
+        super().__init__()
         self.d_model = d_model
         self.d_k = d_k
         self.d_v = d_v
@@ -101,12 +104,13 @@ class MultiHeadAttention(nn.Module):
         self.W_K = nn.Linear(d_model, d_k * n_heads, bias=False)
         self.W_V = nn.Linear(d_model, d_v * n_heads, bias=False)
         self.fc = nn.Linear(n_heads * d_v, d_model, bias=False)
+        self.norm = nn.LayerNorm(d_model).to(DEVICE)
 
     def forward(self, input_Q, input_K, input_V, attn_mask, res_att):
-        residual = input_Q
         batch_size = input_Q.size(0)
+        residual = input_Q
         
-        # Project and reshape
+        # Linear projections
         Q = self.W_Q(input_Q).view(batch_size, -1, self.n_heads, self.d_k).transpose(1, 2)
         K = self.W_K(input_K).view(batch_size, -1, self.n_heads, self.d_k).transpose(1, 2)
         V = self.W_V(input_V).view(batch_size, -1, self.n_heads, self.d_v).transpose(1, 2)
@@ -119,11 +123,14 @@ class MultiHeadAttention(nn.Module):
         context, attn = ScaledDotProductAttention(self.d_k, self.num_of_d)(
             Q, K, V, attn_mask, res_att)
         
-        # Concatenate and project
-        context = context.transpose(1, 2).reshape(batch_size, -1, self.n_heads * self.d_v)
+        # Concatenate heads
+        context = context.transpose(1, 2).contiguous().view(
+            batch_size, -1, self.n_heads * self.d_v)
+        
+        # Final linear projection
         output = self.fc(context)
         
-        return nn.LayerNorm(self.d_model).to(self.DEVICE)(output + residual), attn
+        return self.norm(output + residual), attn
 
 
 class cheb_conv_withSAt(nn.Module):
@@ -310,10 +317,16 @@ class DSTAGNN_block(nn.Module):
         self.register_buffer('dummy', torch.tensor(0))  # Helps XLA tracing        
         # Adjust dimensions for large graph
         self.d_model = min(d_model, 64)  # Limit to prevent memory issues
+        self.n_heads = n_heads
         self.num_of_vertices = num_of_vertices
         self.num_of_timesteps = num_of_timesteps
         
-        self.EmbedT = nn.Linear(num_of_timesteps, self.d_model)
+        # Temporal embedding
+        self.EmbedT = nn.Sequential(
+            nn.Linear(num_of_timesteps, self.d_model),
+            nn.LayerNorm(self.d_model)
+        )
+
         self.EmbedS = nn.Linear(num_of_vertices, self.d_model)
         
         # Attention layers with reduced dimensions
@@ -366,22 +379,22 @@ class DSTAGNN_block(nn.Module):
             )
         
         # 1. Temporal Processing
-        x_flat = x.permute(0,1,3,2).reshape(-1, num_of_timesteps)
+        x_flat = x.permute(0, 1, 3, 2).reshape(-1, num_of_timesteps)
         assert x_flat.size(-1) == self.num_of_timesteps, \
             f"Expected {self.num_of_timesteps} timesteps, got {x_flat.size(-1)}"
         TEmx = self.EmbedT(x_flat).view(
             batch_size, num_of_vertices, num_of_features, -1
-        ).permute(0,2,1,3)  # (B,F,N,d_model)
+        ).permute(0, 2, 1, 3)  # (B, F, N, d_model)
         
-        # Initialize res_att if needed
+        # Initialize residual attention if needed
         if res_att is None or isinstance(res_att, int):
             res_att = torch.zeros(
-                batch_size, num_of_features, self.n_heads, 
+                batch_size, num_of_features, self.n_heads,
                 num_of_timesteps, num_of_timesteps,
                 device=x.device
             )
         
-        # 2. Temporal Attention
+        # Temporal Attention
         TAt_out, temporal_att = self.TAt(
             TEmx, TEmx, TEmx,
             attn_mask=None,
