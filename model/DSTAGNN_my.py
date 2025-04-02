@@ -411,6 +411,14 @@ class DSTAGNN_submodule(nn.Module):
                  cheb_polynomials, adj_pa, adj_TMD, num_for_predict, len_input, num_of_vertices, d_model, d_k, d_v, n_heads):
         super().__init__()
         
+        # Store critical dimensions
+        self.num_of_vertices = num_of_vertices
+        self.num_of_features = in_channels
+        self.num_timesteps = len_input
+        print(f"Initializing model with:")
+        print(f"- Vertices: {num_of_vertices}")
+        print(f"- Features: {in_channels}") 
+        print(f"- Timesteps: {len_input}")
         # Safe dimension limits for large graphs
         self.d_model = min(d_model, 64)
         self.nb_chev_filter = min(nb_chev_filter, 32)
@@ -429,25 +437,18 @@ class DSTAGNN_submodule(nn.Module):
                 DEVICE, num_of_d, in_ch, K,
                 self.nb_chev_filter,
                 self.nb_time_filter,
-                time_strides if i == 0 else 1,  # Only first block does striding
+                time_strides if i == 0 else 1,
                 cheb_polynomials,
                 adj_pa, adj_TMD, num_of_vertices,
-                len_input//(time_strides**i),  # Adjust timesteps for each block
+                len_input//(time_strides**i),
                 self.d_model, d_k, d_v, n_heads
             )
             self.BlockList.append(block)
-            in_ch = self.nb_time_filter  # Update input channels for next block
+            in_ch = self.nb_time_filter
         
         # Final projection
-        total_timesteps = sum(
-            len_input//(time_strides**i) 
-            for i in range(self.nb_block)
-        )
-        self.final_conv = nn.Conv2d(
-            total_timesteps, 
-            128, 
-            kernel_size=(1, self.nb_time_filter)
-        )
+        total_timesteps = sum(len_input//(time_strides**i) for i in range(self.nb_block))
+        self.final_conv = nn.Conv2d(total_timesteps, 128, kernel_size=(1, self.nb_time_filter))
         self.final_fc = nn.Linear(128, num_for_predict)
         
         self._reset_parameters()
@@ -460,37 +461,25 @@ class DSTAGNN_submodule(nn.Module):
                 nn.init.uniform_(p)
     
     def forward(self, x):
-        """
-        Forward pass for the complete submodule
-        Args:
-            x: (B, N, F, T) where:
-               B = batch size
-               N = num_of_vertices (2139)
-               F = num_of_features (4)
-               T = num_of_timesteps
-        Returns:
-            output: (B, N, num_for_predict)
-        """
         # Debug checks
-        assert x.dim() == 4, f"Expected 4D input, got {x.dim()}D"
         B, N, F, T = x.shape
         assert N == self.num_of_vertices, f"Vertex dimension mismatch: {N} vs {self.num_of_vertices}"
+        assert F == self.num_of_features, f"Feature dimension mismatch: {F} vs {self.num_of_features}"
+        assert T == self.num_timesteps, f"Timestep mismatch: {T} vs {self.num_timesteps}"
         
         need_concat = []
-        res_att = 0
+        res_att = torch.zeros(B, F, N, self.d_model, device=x.device)
         
-        # Process through each block
         for i, block in enumerate(self.BlockList):
             x, res_att = block(x, res_att)
-            
-            # Store outputs for concatenation
             need_concat.append(x)
             
-            # Debug shape after each block
-            print(f"After block {i+1}: {x.shape}")
+            # Debug print
+            print(f"Block {i+1} output shape: {x.shape}")
+            xm.mark_step()  # For TPU synchronization
         
-        # Concatenate along time dimension
-        final_x = torch.cat(need_concat, dim=-1)  # (B, N, F, total_timesteps)
+        final_x = torch.cat(need_concat, dim=-1)
+        print(f"Concatenated shape: {final_x.shape}")
         
         # Final projection
         output = final_x.permute(0, 3, 1, 2)  # (B, total_timesteps, N, F)
@@ -498,8 +487,7 @@ class DSTAGNN_submodule(nn.Module):
         output = output.squeeze(-1).permute(0, 2, 1)  # (B, N, 128)
         output = self.final_fc(output)  # (B, N, num_for_predict)
         
-        return outp
-
+        return output
 
 def make_model(DEVICE, num_of_d, nb_block, in_channels, K,
                nb_chev_filter, nb_time_filter, time_strides, adj_mx, adj_pa,
