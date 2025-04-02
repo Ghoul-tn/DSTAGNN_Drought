@@ -87,6 +87,7 @@ class MultiHeadAttention(nn.Module):
         self.W_K = nn.Linear(d_model, d_k * n_heads, bias=False)
         self.W_V = nn.Linear(d_model, d_v * n_heads, bias=False)
         self.fc = nn.Linear(n_heads * d_v, d_model, bias=False)
+        self.layer_norm = nn.LayerNorm(self.d_model).to(self.DEVICE)
 
     def forward(self, input_Q, input_K, input_V, attn_mask, res_att):
         '''
@@ -110,7 +111,8 @@ class MultiHeadAttention(nn.Module):
                                                   self.n_heads * self.d_v)  # context: [batch_size, len_q, n_heads * d_v]
         output = self.fc(context)  # [batch_size, len_q, d_model]
 
-        return nn.LayerNorm(self.d_model).to(self.DEVICE)(output + residual), res_attn
+        return self.layer_norm(output + residual), res_attn
+
 
 
 class cheb_conv_withSAt(nn.Module):
@@ -272,7 +274,7 @@ class DSTAGNN_block(nn.Module):
         self.sigmoid = nn.Sigmoid()
         self.tanh = nn.Tanh()
         self.relu = nn.ReLU(inplace=True)
-
+        
         self.adj_pa = torch.FloatTensor(adj_pa).to(DEVICE)
 
         self.pre_conv = nn.Conv2d(num_of_timesteps, d_model, kernel_size=(1, num_of_d))
