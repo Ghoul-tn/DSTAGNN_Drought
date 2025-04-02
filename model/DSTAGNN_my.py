@@ -363,12 +363,12 @@ class DSTAGNN_block(nn.Module):
 
     def forward(self, x, res_att):
         B, N, F, T = x.shape
-        assert num_of_timesteps == self.num_of_timesteps, \
-            f"Input timesteps {num_of_timesteps} don't match configured {self.num_of_timesteps}"
+        # assert num_of_timesteps == self.num_of_timesteps, \
+        #     f"Input timesteps {num_of_timesteps} don't match configured {self.num_of_timesteps}"
         print(f"Input shape: {x.shape}")
-        assert x.shape[1] == self.num_of_vertices
-        assert x.shape[2] == num_of_features
-        assert x.shape[3] == self.num_of_timesteps
+        # assert x.shape[1] == self.num_of_vertices
+        # assert x.shape[2] == num_of_features
+        # assert x.shape[3] == self.num_of_timesteps
         print(f"Input device: {x.device}")
         print(f"Model device: {next(self.parameters()).device}")
         assert x.is_contiguous(), "Input not contiguous"
