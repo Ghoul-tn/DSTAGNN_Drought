@@ -148,7 +148,6 @@ def main():
             xm.optimizer_step(optimizer, barrier=True)  # TPU sync
             if batch_idx % 10 == 0:
                 print(f"Batch {batch_idx} - Input shape: {encoder_inputs.shape}")
-                print(f"Batch {batch_idx} - Output shape: {outputs.shape}")
                 xm.master_print(f"Batch {batch_idx} completed")
             if batch_idx % 100 == 0:
                 print(f"Memory usage: {xm.get_memory_info(device)}")
@@ -157,7 +156,7 @@ def main():
             loss = criterion(outputs, labels)
             loss.backward()
             xm.optimizer_step(optimizer)
-            
+            print(f"Batch {batch_idx} - Output shape: {outputs.shape}")
             total_loss += loss.item()
             if batch_idx % 100 == 0 and xm.is_master_ordinal():
                 print(f'Epoch {epoch} Batch {batch_idx} Loss: {loss.item():.4f}')
