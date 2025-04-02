@@ -26,40 +26,24 @@ class SScaledDotProductAttention(nn.Module):
 
 class ScaledDotProductAttention(nn.Module):
     def __init__(self, d_k, num_of_d):
-        super().__init__()
+        super(ScaledDotProductAttention, self).__init__()
         self.d_k = d_k
-        self.num_of_d = num_of_d
-        self.softmax = nn.Softmax(dim=-1)
+        self.num_of_d =num_of_d
 
     def forward(self, Q, K, V, attn_mask, res_att):
-        """
+        '''
         Q: [batch_size, n_heads, len_q, d_k]
         K: [batch_size, n_heads, len_k, d_k]
-        V: [batch_size, n_heads, len_v, d_v]
-        res_att: [batch_size, n_heads, len_q, len_k] or None
-        """
-        # Compute attention scores
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / np.sqrt(self.d_k)
-        
-        # Handle residual attention
-        if res_att is not None:
-            # Ensure compatible shapes
-            if res_att.dim() == 4:
-                if res_att.size(1) != scores.size(1):  # Head dimension mismatch
-                    res_att = res_att.repeat(1, scores.size(1)//res_att.size(1), 1, 1)
-                scores = scores + res_att
-        
-        # Apply mask if provided
+        V: [batch_size, n_heads, len_v(=len_k), d_v]
+        attn_mask: [batch_size, n_heads, seq_len, seq_len]
+        '''
+        scores = torch.matmul(Q, K.transpose(-1, -2)) / np.sqrt(self.d_k) + res_att  # scores : [batch_size, n_heads, len_q, len_k]
         if attn_mask is not None:
-            scores.masked_fill_(attn_mask, -1e9)
-            
-        # Compute attention weights
-        attn = self.softmax(scores)
-        
-        # Compute context
-        context = torch.matmul(attn, V)
-        
-        return context, attn
+            scores.masked_fill_(attn_mask, -1e9)  # Fills elements of self tensor with value where mask is True.
+        attn = F.softmax(scores, dim=3)
+        context = torch.matmul(attn, V)  # [batch_size, n_heads, len_q, d_v]
+        return context, scores
+
 
 class SMultiHeadAttention(nn.Module):
     def __init__(self, DEVICE, d_model, d_k ,d_v, n_heads):
@@ -91,62 +75,43 @@ class SMultiHeadAttention(nn.Module):
         return attn
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, DEVICE, d_model, d_k, d_v, n_heads, num_of_d):
-        super().__init__()
+    def __init__(self, DEVICE, d_model, d_k ,d_v, n_heads, num_of_d):
+        super(MultiHeadAttention, self).__init__()
         self.d_model = d_model
         self.d_k = d_k
         self.d_v = d_v
         self.n_heads = n_heads
         self.num_of_d = num_of_d
         self.DEVICE = DEVICE
-        
-        # Projection matrices
         self.W_Q = nn.Linear(d_model, d_k * n_heads, bias=False)
         self.W_K = nn.Linear(d_model, d_k * n_heads, bias=False)
         self.W_V = nn.Linear(d_model, d_v * n_heads, bias=False)
         self.fc = nn.Linear(n_heads * d_v, d_model, bias=False)
-        self.norm = nn.LayerNorm(d_model).to(DEVICE)
 
     def forward(self, input_Q, input_K, input_V, attn_mask, res_att):
-        batch_size = input_Q.size(0)
-        residual = input_Q
-        
-        # Ensure input dimensions match
-        if input_Q.size() != input_K.size() or input_Q.size() != input_V.size():
-            input_K = input_K.expand_as(input_Q)
-            input_V = input_V.expand_as(input_Q)
-        
-        # Linear projections with dimension checks
-        Q = self.W_Q(input_Q).view(batch_size, -1, self.n_heads, self.d_k).transpose(1, 2)
-        K = self.W_K(input_K).view(batch_size, -1, self.n_heads, self.d_k).transpose(1, 2)
-        V = self.W_V(input_V).view(batch_size, -1, self.n_heads, self.d_v).transpose(1, 2)
-        
-        # Prepare attention mask
+        '''
+        input_Q: [batch_size, len_q, d_model]
+        input_K: [batch_size, len_k, d_model]
+        input_V: [batch_size, len_v(=len_k), d_model]
+        attn_mask: [batch_size, seq_len, seq_len]
+        '''
+        residual, batch_size = input_Q, input_Q.size(0)
+        # (B, S, D) -proj-> (B, S, D_new) -split-> (B, S, H, W) -trans-> (B, H, S, W)
+        Q = self.W_Q(input_Q).view(batch_size, self.num_of_d, -1, self.n_heads, self.d_k).transpose(2, 3)  # Q: [batch_size, n_heads, len_q, d_k]
+        K = self.W_K(input_K).view(batch_size, self.num_of_d, -1, self.n_heads, self.d_k).transpose(2, 3)  # K: [batch_size, n_heads, len_k, d_k]
+        V = self.W_V(input_V).view(batch_size, self.num_of_d, -1, self.n_heads, self.d_v).transpose(2, 3)  # V: [batch_size, n_heads, len_v(=len_k), d_v]
         if attn_mask is not None:
-            attn_mask = attn_mask.unsqueeze(1).repeat(1, self.n_heads, 1, 1)
-        
-        # Scaled dot-product attention
-        context, attn = ScaledDotProductAttention(self.d_k, self.num_of_d)(
-            Q, K, V, attn_mask, res_att)
-        
-        # Concatenate heads with contiguous memory
-        context = context.transpose(1, 2).reshape(
-            batch_size, -1, self.n_heads * self.d_v)
-        
-        # Final linear projection
-        output = self.fc(context)
-        
-        # Ensure residual connection dimensions match
-        if output.size() != residual.size():
-            residual = residual.view_as(output)
-        
-        # TPU-compatible normalization
-        output = output + residual
-        output = output.reshape(-1, self.d_model)
-        output = self.norm(output)
-        output = output.view(batch_size, -1, self.d_model)
-        
-        return output, attn
+            attn_mask = attn_mask.unsqueeze(1).repeat(1, self.n_heads, 1,
+                                                  1)  # attn_mask : [batch_size, n_heads, seq_len, seq_len]
+        # context: [batch_size, n_heads, len_q, d_v], attn: [batch_size, n_heads, len_q, len_k]
+        context, res_attn = ScaledDotProductAttention(self.d_k, self.num_of_d)(Q, K, V, attn_mask, res_att)
+
+        context = context.transpose(2, 3).reshape(batch_size, self.num_of_d, -1,
+                                                  self.n_heads * self.d_v)  # context: [batch_size, len_q, n_heads * d_v]
+        output = self.fc(context)  # [batch_size, len_q, d_model]
+
+        return nn.LayerNorm(self.d_model).to(self.DEVICE)(output + residual), res_attn
+
 
 class cheb_conv_withSAt(nn.Module):
     '''
@@ -264,48 +229,23 @@ class Embedding(nn.Module):
         self.nb_seq = nb_seq
         self.Etype = Etype
         self.num_of_features = num_of_features
-        
-        if Etype == 'T':
-            # Temporal embedding
-            self.pos_embed = nn.Embedding(nb_seq, d_Em)
-            self.norm = nn.LayerNorm(d_Em)
-        else:
-            # Spatial embedding
-            self.pos_embed = nn.Embedding(nb_seq, d_Em)
-            self.norm = nn.LayerNorm(d_Em)
+        self.pos_embed = nn.Embedding(nb_seq, d_Em)
+        self.norm = nn.LayerNorm(d_Em)
 
     def forward(self, x, batch_size):
         if self.Etype == 'T':
-            # Input shape: (B, N, F, T)
-            B, N, F, T = x.shape
-            
-            # Get positional embeddings
-            pos = torch.arange(T, dtype=torch.long).to(x.device)
-            pos_embed = self.pos_embed(pos)  # (T, d_Em)
-            
-            # Reshape for broadcasting: (1, 1, 1, T, d_Em)
-            pos_embed = pos_embed.unsqueeze(0).unsqueeze(0).unsqueeze(0)
-            
-            # Process input: (B, N, F, T) -> (B, N, F, T, 1)
-            x = x.unsqueeze(-1)
-            
-            # Add with broadcasting
-            embedding = x + pos_embed  # (B, N, F, T, d_Em)
-            
-            # Flatten for LayerNorm
-            embedding = embedding.reshape(-1, self.pos_embed.embedding_dim)
-            embedding = self.norm(embedding)
-            
-            # Reshape back: (B*N*F*T, d_Em) -> (B, N, F, T, d_Em) -> (B, N, d_Em, T)
-            return embedding.reshape(B, N, F, T, -1).permute(0, 1, 4, 3, 2)[..., 0]
+            pos = torch.arange(self.nb_seq, dtype=torch.long).cuda()
+            pos = pos.unsqueeze(0).unsqueeze(0).expand(batch_size, self.num_of_features,
+                                                   self.nb_seq)  # [seq_len] -> [batch_size, seq_len]
+            embedding = x.permute(0, 2, 3, 1) + self.pos_embed(pos)
         else:
-            # Spatial embedding
-            # Input shape: (B, N, d_model)
-            pos = torch.arange(x.size(1), dtype=torch.long).to(x.device)
-            pos_embed = self.pos_embed(pos)  # (N, d_model)
-            embedding = x + pos_embed.unsqueeze(0)  # (B, N, d_model)
-            return self.norm(embedding)
-            
+            pos = torch.arange(self.nb_seq, dtype=torch.long).cuda()
+            pos = pos.unsqueeze(0).expand(batch_size, self.nb_seq)
+            embedding = x + self.pos_embed(pos)
+        Emx = self.norm(embedding)
+        return Emx
+
+
 class GTU(nn.Module):
     def __init__(self, in_channels, time_strides, kernel_size):
         super(GTU, self).__init__()
@@ -324,175 +264,165 @@ class GTU(nn.Module):
 
 
 class DSTAGNN_block(nn.Module):
+
     def __init__(self, DEVICE, num_of_d, in_channels, K, nb_chev_filter, nb_time_filter, time_strides,
                  cheb_polynomials, adj_pa, adj_TMD, num_of_vertices, num_of_timesteps, d_model, d_k, d_v, n_heads):
-        super().__init__()
-        # Safe initialization
-        self.d_model = min(d_model, 64)
-        self.n_heads = min(n_heads, 2)
-        self.d_k = min(d_k, 32)
-        self.d_v = min(d_v, 32)
-        
-        # Register buffers properly for TPU
-        self.register_buffer('adj_pa', torch.FloatTensor(adj_pa).to(DEVICE))
-        self.register_buffer('adj_TMD', torch.FloatTensor(adj_TMD).to(DEVICE))
-        
-        # Temporal processing with dimension checks
-        self.temporal_proj = nn.Sequential(
-            nn.Linear(num_of_timesteps, self.d_model),
-            nn.LayerNorm(self.d_model)
-        )
-        
-        # Attention layers
-        self.temporal_att = MultiHeadAttention(
-            DEVICE, self.d_model, self.d_k, self.d_v, self.n_heads, num_of_d
-        )
-        self.spatial_att = SMultiHeadAttention(
-            DEVICE, self.d_model, self.d_k, self.d_v, K
-        )
-        
-        # Chebyshev convolution with reduced filters
-        self.cheb_conv = cheb_conv_withSAt(
-            K, cheb_polynomials, in_channels, 
-            min(nb_chev_filter, 32),
-            num_of_vertices
-        )
-        
-        # GTU layers with error handling
+        super(DSTAGNN_block, self).__init__()
+
+        self.sigmoid = nn.Sigmoid()
+        self.tanh = nn.Tanh()
+        self.relu = nn.ReLU(inplace=True)
+
+        self.adj_pa = torch.FloatTensor(adj_pa).cuda()
+
+        self.pre_conv = nn.Conv2d(num_of_timesteps, d_model, kernel_size=(1, num_of_d))
+
+        self.EmbedT = Embedding(num_of_timesteps, num_of_vertices, num_of_d, 'T')
+        self.EmbedS = Embedding(num_of_vertices, d_model, num_of_d, 'S')
+
+        self.TAt = MultiHeadAttention(DEVICE, num_of_vertices, d_k, d_v, n_heads, num_of_d)
+        self.SAt = SMultiHeadAttention(DEVICE, d_model, d_k, d_v, K)
+
+        self.cheb_conv_SAt = cheb_conv_withSAt(K, cheb_polynomials, in_channels, nb_chev_filter, num_of_vertices)
+
         self.gtu3 = GTU(nb_time_filter, time_strides, 3)
         self.gtu5 = GTU(nb_time_filter, time_strides, 5)
         self.gtu7 = GTU(nb_time_filter, time_strides, 7)
-        
-        # Residual connection with proper dimension handling
-        self.res_conv = nn.Sequential(
-            nn.Conv2d(in_channels, nb_time_filter, kernel_size=1, stride=(1, time_strides)),
-            nn.LayerNorm([nb_time_filter, num_of_vertices, num_of_timesteps // time_strides])
+        self.pooling = torch.nn.MaxPool2d(kernel_size=(1, 2), stride=None, padding=0,
+                                          return_indices=False, ceil_mode=False)
+
+        self.residual_conv = nn.Conv2d(in_channels, nb_time_filter, kernel_size=(1, 1), stride=(1, time_strides))
+
+        self.dropout = nn.Dropout(p=0.05)
+        self.fcmy = nn.Sequential(
+            nn.Linear(3 * num_of_timesteps - 12, num_of_timesteps),
+            nn.Dropout(0.05),
         )
+        self.ln = nn.LayerNorm(nb_time_filter)
 
     def forward(self, x, res_att):
-        B, N, F, T = x.shape
-        
-        # 1. Temporal processing with dimension checks
-        x_temp = x.permute(0, 1, 3, 2)  # [B,N,T,F]
-        x_temp = x_temp.reshape(-1, T)  # [B*N*F, T]
-        x_temp = self.temporal_proj(x_temp)  # [B*N*F, d_model]
-        x_temp = x_temp.view(B, N, F, self.d_model)  # [B,N,F,d_model]
-        
-        # 2. Temporal attention with shape verification
-        temp_out, temp_att = self.temporal_att(
-            x_temp, x_temp, x_temp,
-            None, res_att
-        )
-        
-        # 3. Spatial attention with TPU-friendly operations
-        spatial_in = temp_out.reshape(B*N, F, self.d_model)
-        spatial_att = self.spatial_att(spatial_in, spatial_in, None)
-        
-        # 4. Chebyshev convolution with dimension checks
-        x_conv = x.permute(0, 2, 1, 3)  # [B,F,N,T]
-        spatial_out = self.cheb_conv(x_conv, spatial_att, self.adj_pa)
-        
-        # 5. GTU temporal convolution with error handling
-        gtu_outputs = []
-        for gtu in [self.gtu3, self.gtu5, self.gtu7]:
-            try:
-                out = gtu(spatial_out)
-                if out.numel() > 0:  # Only add if not empty
-                    gtu_outputs.append(out)
-            except RuntimeError as e:
-                print(f"Skipping GTU due to error: {str(e)}")
-                continue
-                
-        if not gtu_outputs:
-            raise ValueError("All GTU outputs were empty")
-        
-        time_out = torch.cat(gtu_outputs, dim=-1)
-        
-        # 6. Residual connection with dimension matching
-        res = self.res_conv(x.permute(0, 2, 1, 3))
-        if res.size() != time_out.size():
-            res = F.interpolate(res, size=time_out.size()[2:], mode='nearest')
-        
-        output = F.relu(res + time_out)
-        
-        return output.permute(0, 2, 1, 3), temp_att
-    
+        '''
+        :param x: (Batch_size, N, F_in, T)
+        :param res_att: (Batch_size, N, F_in, T)
+        :return: (Batch_size, N, nb_time_filter, T)
+        '''
+        batch_size, num_of_vertices, num_of_features, num_of_timesteps = x.shape  # B,N,F,T
+
+        # TAT
+        if num_of_features == 1:
+            TEmx = self.EmbedT(x, batch_size)  # B,F,T,N
+        else:
+            TEmx = x.permute(0, 2, 3, 1)
+        TATout, re_At = self.TAt(TEmx, TEmx, TEmx, None, res_att)  # B,F,T,N; B,F,Ht,T,T
+
+        x_TAt = self.pre_conv(TATout.permute(0, 2, 3, 1))[:, :, :, -1].permute(0, 2, 1)  # B,N,d_model
+
+        # SAt
+        SEmx_TAt = self.EmbedS(x_TAt, batch_size)  # B,N,d_model
+        SEmx_TAt = self.dropout(SEmx_TAt)   # B,N,d_model
+        STAt = self.SAt(SEmx_TAt, SEmx_TAt, None)  # B,Hs,N,N
+
+        # graph convolution in spatial dim
+        spatial_gcn = self.cheb_conv_SAt(x, STAt, self.adj_pa)  # B,N,F,T
+
+        # convolution along the time axis
+        X = spatial_gcn.permute(0, 2, 1, 3)  # B,F,N,T
+        x_gtu = []
+        x_gtu.append(self.gtu3(X))  # B,F,N,T-2
+        x_gtu.append(self.gtu5(X))  # B,F,N,T-4
+        x_gtu.append(self.gtu7(X))  # B,F,N,T-6
+        time_conv = torch.cat(x_gtu, dim=-1)  # B,F,N,3T-12
+        time_conv = self.fcmy(time_conv)
+
+        if num_of_features == 1:
+            time_conv_output = self.relu(time_conv)
+        else:
+            time_conv_output = self.relu(X + time_conv)  # B,F,N,T
+
+        # residual shortcut
+        if num_of_features == 1:
+            x_residual = self.residual_conv(x.permute(0, 2, 1, 3))
+        else:
+            x_residual = x.permute(0, 2, 1, 3)
+        x_residual = self.ln(F.relu(x_residual + time_conv_output).permute(0, 3, 2, 1)).permute(0, 2, 3, 1)
+
+        return x_residual, re_At
+
+
 class DSTAGNN_submodule(nn.Module):
+
     def __init__(self, DEVICE, num_of_d, nb_block, in_channels, K, nb_chev_filter, nb_time_filter, time_strides,
                  cheb_polynomials, adj_pa, adj_TMD, num_for_predict, len_input, num_of_vertices, d_model, d_k, d_v, n_heads):
-        super().__init__()
-        
-        # Safe initialization
-        self.num_blocks = min(nb_block, 2)
-        self.time_strides = time_strides
-        
-        # Initialize blocks
-        self.blocks = nn.ModuleList()
-        in_ch = in_channels
-        for i in range(self.num_blocks):
-            block = DSTAGNN_block(
-                DEVICE, num_of_d, in_ch, K,
-                nb_chev_filter, nb_time_filter,
-                time_strides if i == 0 else 1,
-                cheb_polynomials,
-                adj_pa, adj_TMD, num_of_vertices,
-                len_input//(time_strides**i),
-                min(d_model,64), min(d_k,32), min(d_v,32), min(n_heads,2)
-            )
-            self.blocks.append(block)
-            in_ch = nb_time_filter
-        
-        # Final projection
-        self.final_conv = nn.Conv2d(nb_time_filter, 128, kernel_size=(1,1))
+        '''
+        :param nb_block:
+        :param in_channels:
+        :param K:
+        :param nb_chev_filter:
+        :param nb_time_filter:
+        :param time_strides:
+        :param cheb_polynomials:
+        :param num_for_predict:
+        '''
+
+        super(DSTAGNN_submodule, self).__init__()
+
+        self.BlockList = nn.ModuleList([DSTAGNN_block(DEVICE, num_of_d, in_channels, K,
+                                                     nb_chev_filter, nb_time_filter, time_strides, cheb_polynomials,
+                                                     adj_pa, adj_TMD, num_of_vertices, len_input, d_model, d_k, d_v, n_heads)])
+
+        self.BlockList.extend([DSTAGNN_block(DEVICE, num_of_d * nb_time_filter, nb_chev_filter, K,
+                                            nb_chev_filter, nb_time_filter, 1, cheb_polynomials,
+                                            adj_pa, adj_TMD, num_of_vertices, len_input//time_strides, d_model, d_k, d_v, n_heads) for _ in range(nb_block-1)])
+
+        self.final_conv = nn.Conv2d(int((len_input/time_strides) * nb_block), 128, kernel_size=(1, nb_time_filter))
         self.final_fc = nn.Linear(128, num_for_predict)
+        self.DEVICE = DEVICE
+
+        self.to(DEVICE)
 
     def forward(self, x):
-        B, N, F, T = x.shape
-        res_att = None
-        block_outputs = []
-        
-        for i, block in enumerate(self.blocks):
+        '''
+        :param x: (B, N_nodes, F_in, T_in)
+        :return: (B, N_nodes, T_out)
+        '''
+        """
+        for block in self.BlockList:
+            x = block(x)
+            
+        output = self.final_conv(x.permute(0, 3, 1, 2))[:, :, :, -1].permute(0, 2, 1)
+        # (b,N,F,T)->(b,T,N,F)-conv<1,F>->(b,c_out*T,N,1)->(b,c_out*T,N)->(b,N,T)
+        """
+        need_concat = []
+        res_att = 0
+        for block in self.BlockList:
             x, res_att = block(x, res_att)
-            
-            # Only keep last block output to save memory
-            if i == len(self.blocks) - 1:
-                block_outputs.append(x)
-            
-            # TPU synchronization
-            xm.mark_step()
-        
-        if not block_outputs:
-            raise ValueError("No outputs from blocks")
-        
-        # Process final output
-        final_output = block_outputs[-1]  # [B,N,F,T]
-        
-        # Final projection
-        output = final_output.permute(0, 3, 1, 2)  # [B,T,N,F]
-        output = self.final_conv(output)  # [B,128,N,F]
-        output = output.mean(dim=-1)  # [B,128,N]
-        output = self.final_fc(output.permute(0, 2, 1))  # [B,N,num_for_predict]
-        
+            need_concat.append(x)
+
+        final_x = torch.cat(need_concat, dim=-1)
+        output1 = self.final_conv(final_x.permute(0, 3, 1, 2))[:, :, :, -1].permute(0, 2, 1)
+        output = self.final_fc(output1)
+
         return output
+
+
 def make_model(DEVICE, num_of_d, nb_block, in_channels, K,
                nb_chev_filter, nb_time_filter, time_strides, adj_mx, adj_pa,
                adj_TMD, num_for_predict, len_input, num_of_vertices, d_model, d_k, d_v, n_heads):
-    
-    # Convert adjacency matrices to proper tensors
-    if not torch.is_tensor(adj_mx):
-        adj_mx = torch.FloatTensor(adj_mx).to(DEVICE)
-    if not torch.is_tensor(adj_pa):
-        adj_pa = torch.FloatTensor(adj_pa).to(DEVICE)
-    if not torch.is_tensor(adj_TMD):
-        adj_TMD = torch.FloatTensor(adj_TMD).to(DEVICE)
-    
-    # Compute Laplacian
-    adj_mx_np = adj_mx.cpu().numpy() if torch.is_tensor(adj_mx) else adj_mx
-    L_tilde = scaled_Laplacian(adj_mx_np)
-    
-    # Convert polynomials to device
-    cheb_polynomials = [torch.from_numpy(i).float().to(DEVICE) for i in cheb_polynomial(L_tilde, K)]
-    
+    '''
+
+    :param DEVICE:
+    :param nb_block:
+    :param in_channels:
+    :param K:
+    :param nb_chev_filter:
+    :param nb_time_filter:
+    :param time_strides:
+    :param num_for_predict:
+    :param len_input
+    :return:
+    '''
+    L_tilde = scaled_Laplacian(adj_mx)
+    cheb_polynomials = [torch.from_numpy(i).type(torch.FloatTensor).to(DEVICE) for i in cheb_polynomial(L_tilde, K)]
     model = DSTAGNN_submodule(DEVICE, num_of_d, nb_block, in_channels,
                              K, nb_chev_filter, nb_time_filter, time_strides, cheb_polynomials,
                              adj_pa, adj_TMD, num_for_predict, len_input, num_of_vertices, d_model, d_k, d_v, n_heads)
