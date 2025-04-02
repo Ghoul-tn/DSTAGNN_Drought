@@ -338,139 +338,117 @@ class DSTAGNN_block(nn.Module):
         )
         self.ln = nn.LayerNorm(nb_time_filter)
 
-    def forward(self, x, res_att):
-        '''
-        :param x: (Batch_size, N, F_in, T)
-        :param res_att: (Batch_size, N, F_in, T)
-        :return: (Batch_size, N, nb_time_filter, T)
-        '''
-        batch_size, num_of_vertices, num_of_features, num_of_timesteps = x.shape  # B,N,F,T
-        assert num_of_timesteps == self.num_of_timesteps, \
-            f"Input timesteps {num_of_timesteps} don't match configured {self.num_of_timesteps}"
-        print(f"Input shape: {x.shape}")
-        assert x.shape[1] == self.num_of_vertices
-        assert x.shape[2] == num_of_features
-        assert x.shape[3] == self.num_of_timesteps
-        print(f"Input device: {x.device}")
-        print(f"Model device: {next(self.parameters()).device}")
-        assert x.is_contiguous(), "Input not contiguous"
-        # 1. Temporal Processing (optimized for TPU)
-        # Reshape: (B,N,F,T) -> (B*N,F,T) -> (B*N*F,T)
-        x_flat = x.permute(0,1,3,2).reshape(-1, num_of_timesteps)
+def forward(self, x, res_att):
+    batch_size, num_of_vertices, num_of_features, num_of_timesteps = x.shape
+    assert num_of_timesteps == self.num_of_timesteps, \
+        f"Input timesteps {num_of_timesteps} don't match configured {self.num_of_timesteps}"
+    print(f"Input shape: {x.shape}")
+    assert x.shape[1] == self.num_of_vertices
+    assert x.shape[2] == num_of_features
+    assert x.shape[3] == self.num_of_timesteps
+    print(f"Input device: {x.device}")
+    print(f"Model device: {next(self.parameters()).device}")
+    assert x.is_contiguous(), "Input not contiguous"
         
-        # Temporal embedding with dimension check
-        assert x_flat.size(-1) == self.num_of_timesteps, \
-            f"Expected {self.num_of_timesteps} timesteps, got {x_flat.size(-1)}"
-        TEmx = self.EmbedT(x_flat)  # (B*N*F, d_model)
-        
-        # Reshape back with proper dimensions
-        TEmx = TEmx.view(batch_size, num_of_vertices, num_of_features, -1)
-        TEmx = TEmx.permute(0,2,1,3)  # (B,F,N,d_model)
-        
-        # 2. Temporal Attention with safe LayerNorm
-        # Ensure proper residual connection shape
-        if res_att is not None:
-            res_att = res_att.expand_as(TEmx)
-        
-        # Modified attention forward pass
-        TAt_out = TEmx
-        for _ in range(self.n_heads):
-            # Process each head separately to reduce memory
-            head_out, temporal_att = self.TAt(
-                TEmx, TEmx, TEmx,
-                attn_mask=None,
-                res_att=res_att
-            )
-            TAt_out = TAt_out + head_out
-        
-        # Safe normalization
-        TAt_out = TAt_out.reshape(-1, self.d_model)
-        TAt_out = self.TAt_norm(TAt_out)
-        TAt_out = TAt_out.view(batch_size, num_of_features, num_of_vertices, -1)
-        
-        # 3. Spatial Processing
-        SAt_in = TAt_out.reshape(-1, num_of_vertices, self.d_model)
-        spatial_att = self.SAt(SAt_in, SAt_in, None)
-        
-        # 4. Chebyshev Convolution
-        x_conv = x.permute(0,2,1,3)  # (B,F,N,T)
-        spatial_gcn = self.cheb_conv_SAt(x_conv, spatial_att, self.adj_pa)
-        
-        # 5. Temporal Convolution (GTUs)
-        time_conv = torch.cat([
-            self.gtu3(spatial_gcn),
-            self.gtu5(spatial_gcn),
-            self.gtu7(spatial_gcn)
-        ], dim=-1)
-        time_conv = self.fcmy(time_conv)
-        
-        # 6. Residual Connection
-        x_res = x.permute(0,2,1,3) if num_of_features > 1 else \
-                self.residual_conv(x.permute(0,2,1,3))
-        
-        # Final output with safe LayerNorm
-        output = F.relu(x_res + time_conv)
-        output = output.permute(0,2,1,3)  # (B,N,F,T)
-        
-        # Flatten for LayerNorm
-        output_flat = output.reshape(-1, output.size(-1))
-        output_flat = self.ln(output_flat)
-        output = output_flat.view_as(output)
-        
-        return output, temporal_att
+
+
+    # Initialize res_att properly if it's the first block
+    if isinstance(res_att, int):
+        res_att = torch.zeros(
+            batch_size, num_of_features, num_of_vertices, self.d_model,
+            device=x.device, dtype=x.dtype
+        )
+    
+    # 1. Temporal Processing
+    x_flat = x.permute(0,1,3,2).reshape(-1, num_of_timesteps)
+    assert x_flat.size(-1) == self.num_of_timesteps, \
+        f"Expected {self.num_of_timesteps} timesteps, got {x_flat.size(-1)}"
+    TEmx = self.EmbedT(x_flat).view(
+        batch_size, num_of_vertices, num_of_features, -1
+    ).permute(0,2,1,3)  # (B,F,N,d_model)
+    
+    # 2. Temporal Attention
+    TAt_out, temporal_att = self.TAt(
+        TEmx, TEmx, TEmx,
+        attn_mask=None,
+        res_att=res_att
+    )
+    
+    # 3. Spatial Processing
+    SAt_in = TAt_out.permute(0,2,1,3).reshape(-1, num_of_vertices, self.d_model)
+    spatial_att = self.SAt(SAt_in, SAt_in, None)
+    
+    # 4. Chebyshev Convolution
+    x_conv = x.permute(0,2,1,3)  # (B,F,N,T)
+    spatial_gcn = self.cheb_conv_SAt(x_conv, spatial_att, self.adj_pa)
+    
+    # 5. Temporal Convolution
+    time_conv = torch.cat([
+        self.gtu3(spatial_gcn),
+        self.gtu5(spatial_gcn), 
+        self.gtu7(spatial_gcn)
+    ], dim=-1)
+    time_conv = self.fcmy(time_conv)
+    
+    # 6. Residual Connection
+    x_res = x.permute(0,2,1,3)
+    if num_of_features == 1:
+        x_res = self.residual_conv(x_res)
+    
+    output = F.relu(x_res + time_conv)
+    output = output.permute(0,2,1,3)  # (B,N,F,T)
+    
+    # LayerNorm
+    output = output.permute(0,2,3,1)  # (B,F,T,N)
+    output = self.ln(output)
+    output = output.permute(0,3,1,2)  # (B,N,F,T)
+    
+    return output, temporal_att
 
 class DSTAGNN_submodule(nn.Module):
     def __init__(self, DEVICE, num_of_d, nb_block, in_channels, K, nb_chev_filter, nb_time_filter, time_strides,
                  cheb_polynomials, adj_pa, adj_TMD, num_for_predict, len_input, num_of_vertices, d_model, d_k, d_v, n_heads):
-        super(DSTAGNN_submodule, self).__init__()
+        super().__init__()
         
-        # Adjust dimensions for large graphs
-        self.d_model = min(d_model, 64)  # Limit to prevent memory issues
-        self.nb_block = min(nb_block, 2)  # Reduce block count for stability
-        self.num_of_vertices = num_of_vertices
-        self.len_input = len_input
-        self.num_for_predict = num_for_predict
+        # Safe dimension limits for large graphs
+        self.d_model = min(d_model, 64)
+        self.nb_chev_filter = min(nb_chev_filter, 32)
+        self.nb_time_filter = min(nb_time_filter, 32)
+        self.nb_block = min(nb_block, 2)
         
-        # Register buffers for TPU compatibility
+        # Register buffers properly for TPU
         self.register_buffer('adj_pa', torch.FloatTensor(adj_pa).to(DEVICE))
         self.register_buffer('adj_TMD', torch.FloatTensor(adj_TMD).to(DEVICE))
         
-        # First block handles the initial feature dimension
-        self.BlockList = nn.ModuleList([DSTAGNN_block(
-            DEVICE, num_of_d, in_channels, K,
-            min(nb_chev_filter, 32),  # Reduced filter size
-            min(nb_time_filter, 32),  # Reduced filter size
-            time_strides, cheb_polynomials,
-            adj_pa, adj_TMD, num_of_vertices,
-            len_input, self.d_model, d_k, d_v, n_heads
-        )])
+        # Block initialization
+        self.BlockList = nn.ModuleList()
+        in_ch = in_channels
+        for i in range(self.nb_block):
+            block = DSTAGNN_block(
+                DEVICE, num_of_d, in_ch, K,
+                self.nb_chev_filter,
+                self.nb_time_filter,
+                time_strides if i == 0 else 1,  # Only first block does striding
+                cheb_polynomials,
+                adj_pa, adj_TMD, num_of_vertices,
+                len_input//(time_strides**i),  # Adjust timesteps for each block
+                self.d_model, d_k, d_v, n_heads
+            )
+            self.BlockList.append(block)
+            in_ch = self.nb_time_filter  # Update input channels for next block
         
-        # Subsequent blocks (if any) handle reduced dimensions
-        if nb_block > 1:
-            self.BlockList.extend([
-                DSTAGNN_block(
-                    DEVICE, num_of_d * nb_time_filter, 
-                    min(nb_chev_filter, 32), K,
-                    min(nb_chev_filter, 32),
-                    min(nb_time_filter, 32),
-                    1,  # Fixed stride after first block
-                    cheb_polynomials,
-                    adj_pa, adj_TMD, num_of_vertices,
-                    len_input//time_strides, self.d_model, d_k, d_v, n_heads
-                ) for _ in range(nb_block-1)
-            ])
-        
-        # Final projection layers with dimension checks
-        total_timesteps = sum([len_input//(time_strides*(i+1)) for i in range(nb_block)])
-        self.final_conv = nn.Conv2d(
-            in_channels=total_timesteps,
-            out_channels=128,
-            kernel_size=(1, min(nb_time_filter, 32))  # Reduced kernel dimension
+        # Final projection
+        total_timesteps = sum(
+            len_input//(time_strides**i) 
+            for i in range(self.nb_block)
         )
-        
+        self.final_conv = nn.Conv2d(
+            total_timesteps, 
+            128, 
+            kernel_size=(1, self.nb_time_filter)
+        )
         self.final_fc = nn.Linear(128, num_for_predict)
         
-        # Initialize weights properly for TPU
         self._reset_parameters()
         
     def _reset_parameters(self):
