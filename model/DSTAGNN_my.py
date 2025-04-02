@@ -226,7 +226,7 @@ class cheb_conv(nn.Module):
         return F.relu(torch.cat(outputs, dim=-1))
 
 class Embedding(nn.Module):
-    def __init__(self, nb_seq, d_Em, num_of_features, Etype):
+    def __init__(self, nb_seq, d_Em, num_of_features, Etype, DEVICE):
         super(Embedding, self).__init__()
         self.nb_seq = nb_seq
         self.Etype = Etype
@@ -280,7 +280,7 @@ class DSTAGNN_block(nn.Module):
         self.pre_conv = nn.Conv2d(num_of_timesteps, d_model, kernel_size=(1, num_of_d))
 
         self.EmbedT = Embedding(num_of_timesteps, num_of_vertices, num_of_d, 'T')
-        self.EmbedS = Embedding(num_of_vertices, d_model, num_of_d, 'S')
+        self.EmbedS = Embedding(num_of_vertices, d_model, num_of_d, 'S', DEVICE)
 
         self.TAt = MultiHeadAttention(DEVICE, num_of_vertices, d_k, d_v, n_heads, num_of_d)
         self.SAt = SMultiHeadAttention(DEVICE, d_model, d_k, d_v, K)
