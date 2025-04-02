@@ -273,7 +273,7 @@ class DSTAGNN_block(nn.Module):
         self.tanh = nn.Tanh()
         self.relu = nn.ReLU(inplace=True)
 
-        self.adj_pa = torch.FloatTensor(adj_pa).to(x.device)
+        self.adj_pa = torch.FloatTensor(adj_pa).to(self.device)
 
         self.pre_conv = nn.Conv2d(num_of_timesteps, d_model, kernel_size=(1, num_of_d))
 
