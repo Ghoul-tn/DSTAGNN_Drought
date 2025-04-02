@@ -33,20 +33,21 @@ class ScaledDotProductAttention(nn.Module):
 
     def forward(self, Q, K, V, attn_mask, res_att):
         """
-        Q: [batch_size, num_of_d, n_heads, len_q, d_k]
-        K: [batch_size, num_of_d, n_heads, len_k, d_k]
-        V: [batch_size, num_of_d, n_heads, len_v, d_v]
-        res_att: [batch_size, num_of_d, n_heads, len_q, len_k]
+        Q: [batch_size, n_heads, len_q, d_k]
+        K: [batch_size, n_heads, len_k, d_k]
+        V: [batch_size, n_heads, len_v, d_v]
+        res_att: [batch_size, n_heads, len_q, len_k] or None
         """
         # Compute attention scores
-        scores = torch.matmul(Q, K.transpose(-1, -2)) / np.sqrt(self.d_k)
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / np.sqrt(self.d_k)
         
-        # Add residual attention if provided
+        # Handle residual attention
         if res_att is not None:
-            # Ensure res_att has the same shape as scores
-            if res_att.shape != scores.shape:
-                res_att = res_att.expand_as(scores)
-            scores = scores + res_att
+            # Ensure compatible shapes
+            if res_att.dim() == 4:
+                if res_att.size(1) != scores.size(1):  # Head dimension mismatch
+                    res_att = res_att.repeat(1, scores.size(1)//res_att.size(1), 1, 1)
+                scores = scores + res_att
         
         # Apply mask if provided
         if attn_mask is not None:
@@ -118,6 +119,11 @@ class MultiHeadAttention(nn.Module):
         # Prepare attention mask
         if attn_mask is not None:
             attn_mask = attn_mask.unsqueeze(1).repeat(1, self.n_heads, 1, 1)
+        
+        # Handle residual attention shape
+        if res_att is not None and res_att.dim() == 4:
+            if res_att.size(1) != self.n_heads:
+                res_att = res_att.repeat(1, self.n_heads//res_att.size(1), 1, 1)
         
         # Scaled dot-product attention
         context, attn = ScaledDotProductAttention(self.d_k, self.num_of_d)(
@@ -317,10 +323,11 @@ class DSTAGNN_block(nn.Module):
         self.register_buffer('dummy', torch.tensor(0))  # Helps XLA tracing        
         # Adjust dimensions for large graph
         self.d_model = min(d_model, 64)  # Limit to prevent memory issues
-        self.n_heads = n_heads
         self.num_of_vertices = num_of_vertices
         self.num_of_timesteps = num_of_timesteps
-        
+        self.n_heads = min(n_heads, 2)  # Reduce head count for stability
+        self.d_k = min(d_k, 32)
+        self.d_v = min(d_v, 32)
         # Temporal embedding
         self.EmbedT = nn.Sequential(
             nn.Linear(num_of_timesteps, self.d_model),
@@ -331,7 +338,7 @@ class DSTAGNN_block(nn.Module):
         
         # Attention layers with reduced dimensions
         self.TAt = MultiHeadAttention(
-            DEVICE, self.d_model, d_k, d_v, n_heads, num_of_d)
+                    DEVICE, self.d_model, self.d_k, self.d_v, self.n_heads, num_of_d)
         self.SAt = SMultiHeadAttention(
             DEVICE, self.d_model, d_k, d_v, K)
         
@@ -386,13 +393,14 @@ class DSTAGNN_block(nn.Module):
             batch_size, num_of_vertices, num_of_features, -1
         ).permute(0, 2, 1, 3)  # (B, F, N, d_model)
         
-        # Initialize residual attention if needed
+        # Initialize residual attention properly
         if res_att is None or isinstance(res_att, int):
             res_att = torch.zeros(
-                batch_size, num_of_features, self.n_heads,
-                num_of_timesteps, num_of_timesteps,
+                batch_size, self.n_heads, num_of_timesteps, num_of_timesteps,
                 device=x.device
             )
+        elif res_att.dim() == 4 and res_att.size(1) != self.n_heads:
+            res_att = res_att.repeat(1, self.n_heads//res_att.size(1), 1, 1)
         
         # Temporal Attention
         TAt_out, temporal_att = self.TAt(
@@ -400,7 +408,6 @@ class DSTAGNN_block(nn.Module):
             attn_mask=None,
             res_att=res_att
         )
-        
         # 3. Spatial Processing
         SAt_in = TAt_out.permute(0,2,1,3).reshape(-1, num_of_vertices, self.d_model)
         spatial_att = self.SAt(SAt_in, SAt_in, None)
