@@ -337,9 +337,6 @@ class DSTAGNN_block(nn.Module):
             nn.Dropout(0.05),
         )
         self.ln = nn.LayerNorm(nb_time_filter)
-        print(f"Input device: {x.device}")
-        print(f"Model device: {next(self.parameters()).device}")
-        assert x.is_contiguous(), "Input not contiguous"
 
     def forward(self, x, res_att):
         '''
@@ -354,6 +351,9 @@ class DSTAGNN_block(nn.Module):
         assert x.shape[1] == self.num_of_vertices
         assert x.shape[2] == num_of_features
         assert x.shape[3] == self.num_of_timesteps
+        print(f"Input device: {x.device}")
+        print(f"Model device: {next(self.parameters()).device}")
+        assert x.is_contiguous(), "Input not contiguous"
         # 1. Temporal Processing (optimized for TPU)
         # Reshape: (B,N,F,T) -> (B*N,F,T) -> (B*N*F,T)
         x_flat = x.permute(0,1,3,2).reshape(-1, num_of_timesteps)
