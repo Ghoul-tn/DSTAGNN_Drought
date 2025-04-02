@@ -379,7 +379,8 @@ class DSTAGNN_block(nn.Module):
             temp_out.reshape(B*N, F, self.d_model),
             None
         )
-        
+        print(f"Shape after temporal attention: {temp_out.shape}")
+        print(f"Shape after spatial attention: {spatial_out.shape}")
         # 4. Chebyshev convolution
         x_conv = x.permute(0, 2, 1, 3)  # [B,F,N,T]
         spatial_out = self.cheb_conv(x_conv, spatial_att, self.adj_pa)
