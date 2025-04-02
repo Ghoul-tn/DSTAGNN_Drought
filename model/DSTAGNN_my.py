@@ -292,7 +292,9 @@ class DSTAGNN_block(nn.Module):
     def __init__(self, DEVICE, num_of_d, in_channels, K, nb_chev_filter, nb_time_filter, time_strides,
                  cheb_polynomials, adj_pa, adj_TMD, num_of_vertices, num_of_timesteps, d_model, d_k, d_v, n_heads):
         super(DSTAGNN_block, self).__init__()
-        
+        assert num_of_vertices == 2139, "Graph size mismatch"
+        assert num_of_timesteps == 144, "Sequence length mismatch"
+        self.register_buffer('dummy', torch.tensor(0))  # Helps XLA tracing        
         # Adjust dimensions for large graph
         self.d_model = min(d_model, 64)  # Limit to prevent memory issues
         self.num_of_vertices = num_of_vertices
@@ -335,6 +337,9 @@ class DSTAGNN_block(nn.Module):
             nn.Dropout(0.05),
         )
         self.ln = nn.LayerNorm(nb_time_filter)
+        print(f"Input device: {x.device}")
+        print(f"Model device: {next(self.parameters()).device}")
+        assert x.is_contiguous(), "Input not contiguous"
 
     def forward(self, x, res_att):
         '''
@@ -349,67 +354,70 @@ class DSTAGNN_block(nn.Module):
         assert x.shape[1] == self.num_of_vertices
         assert x.shape[2] == num_of_features
         assert x.shape[3] == self.num_of_timesteps
-        # 1. Temporal Attention (TAt)
-        # Reshape for temporal processing: (B, N, F, T) -> (B*N, F, T) -> (B*N*F, T)
-        x_flat = x.permute(0, 1, 3, 2).reshape(-1, num_of_timesteps)  # (B*N*F, T)
+        # 1. Temporal Processing (optimized for TPU)
+        # Reshape: (B,N,F,T) -> (B*N,F,T) -> (B*N*F,T)
+        x_flat = x.permute(0,1,3,2).reshape(-1, num_of_timesteps)
         
-        # Temporal embedding
+        # Temporal embedding with dimension check
+        assert x_flat.size(-1) == self.num_of_timesteps, \
+            f"Expected {self.num_of_timesteps} timesteps, got {x_flat.size(-1)}"
         TEmx = self.EmbedT(x_flat)  # (B*N*F, d_model)
         
-        # Reshape back: (B, N, F, d_model)
-        TEmx = TEmx.view(batch_size, num_of_vertices, num_of_features, self.d_model)
+        # Reshape back with proper dimensions
+        TEmx = TEmx.view(batch_size, num_of_vertices, num_of_features, -1)
+        TEmx = TEmx.permute(0,2,1,3)  # (B,F,N,d_model)
         
-        # Prepare for attention: (B, F, N, d_model)
-        TEmx = TEmx.permute(0, 2, 1, 3)
+        # 2. Temporal Attention with safe LayerNorm
+        # Ensure proper residual connection shape
+        if res_att is not None:
+            res_att = res_att.expand_as(TEmx)
         
-        # Temporal attention
-        TAt_out, temporal_att = self.TAt(
-            TEmx, TEmx, TEmx, 
-            attn_mask=None,
-            res_att=res_att
-        )  # (B, F, N, d_model)
+        # Modified attention forward pass
+        TAt_out = TEmx
+        for _ in range(self.n_heads):
+            # Process each head separately to reduce memory
+            head_out, temporal_att = self.TAt(
+                TEmx, TEmx, TEmx,
+                attn_mask=None,
+                res_att=res_att
+            )
+            TAt_out = TAt_out + head_out
         
-        # 2. Spatial Attention (SAt)
-        # Prepare spatial features: (B, F, N, d_model) -> (B*F, N, d_model)
+        # Safe normalization
+        TAt_out = TAt_out.reshape(-1, self.d_model)
+        TAt_out = self.TAt_norm(TAt_out)
+        TAt_out = TAt_out.view(batch_size, num_of_features, num_of_vertices, -1)
+        
+        # 3. Spatial Processing
         SAt_in = TAt_out.reshape(-1, num_of_vertices, self.d_model)
+        spatial_att = self.SAt(SAt_in, SAt_in, None)
         
-        # Spatial attention scores
-        spatial_att = self.SAt(SAt_in, SAt_in, None)  # (B*F, K, N, N)
+        # 4. Chebyshev Convolution
+        x_conv = x.permute(0,2,1,3)  # (B,F,N,T)
+        spatial_gcn = self.cheb_conv_SAt(x_conv, spatial_att, self.adj_pa)
         
-        # 3. Chebyshev Convolution with Spatial Attention
-        # Reshape x for convolution: (B, N, F, T)
-        x_conv = x.permute(0, 2, 1, 3)  # (B, F, N, T)
+        # 5. Temporal Convolution (GTUs)
+        time_conv = torch.cat([
+            self.gtu3(spatial_gcn),
+            self.gtu5(spatial_gcn),
+            self.gtu7(spatial_gcn)
+        ], dim=-1)
+        time_conv = self.fcmy(time_conv)
         
-        # Graph convolution
-        spatial_gcn = self.cheb_conv_SAt(
-            x_conv, 
-            spatial_att, 
-            self.adj_pa
-        )  # (B, F, N, T)
+        # 6. Residual Connection
+        x_res = x.permute(0,2,1,3) if num_of_features > 1 else \
+                self.residual_conv(x.permute(0,2,1,3))
         
-        # 4. Temporal Convolution (GTUs)
-        # Process through GTU layers
-        x_gtu3 = self.gtu3(spatial_gcn)  # (B, F, N, T-2)
-        x_gtu5 = self.gtu5(spatial_gcn)  # (B, F, N, T-4)
-        x_gtu7 = self.gtu7(spatial_gcn)  # (B, F, N, T-6)
-        
-        # Concatenate and project
-        time_conv = torch.cat([x_gtu3, x_gtu5, x_gtu7], dim=-1)  # (B, F, N, 3T-12)
-        time_conv = self.fcmy(time_conv)  # (B, F, N, T)
-        
-        # 5. Residual Connection
-        if num_of_features == 1:
-            x_res = self.residual_conv(x.permute(0, 2, 1, 3))  # (B, F, N, T)
-        else:
-            x_res = x.permute(0, 2, 1, 3)  # (B, F, N, T)
-        
-        # Combine and normalize
+        # Final output with safe LayerNorm
         output = F.relu(x_res + time_conv)
-        output = output.permute(0, 2, 1, 3)  # (B, N, F, T)
-        output = self.ln(output)
+        output = output.permute(0,2,1,3)  # (B,N,F,T)
+        
+        # Flatten for LayerNorm
+        output_flat = output.reshape(-1, output.size(-1))
+        output_flat = self.ln(output_flat)
+        output = output_flat.view_as(output)
         
         return output, temporal_att
-
 
 class DSTAGNN_submodule(nn.Module):
     def __init__(self, DEVICE, num_of_d, nb_block, in_channels, K, nb_chev_filter, nb_time_filter, time_strides,
