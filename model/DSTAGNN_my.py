@@ -338,73 +338,73 @@ class DSTAGNN_block(nn.Module):
         )
         self.ln = nn.LayerNorm(nb_time_filter)
 
-def forward(self, x, res_att):
-    batch_size, num_of_vertices, num_of_features, num_of_timesteps = x.shape
-    assert num_of_timesteps == self.num_of_timesteps, \
-        f"Input timesteps {num_of_timesteps} don't match configured {self.num_of_timesteps}"
-    print(f"Input shape: {x.shape}")
-    assert x.shape[1] == self.num_of_vertices
-    assert x.shape[2] == num_of_features
-    assert x.shape[3] == self.num_of_timesteps
-    print(f"Input device: {x.device}")
-    print(f"Model device: {next(self.parameters()).device}")
-    assert x.is_contiguous(), "Input not contiguous"
-    print(f"Input stats - mean: {x.mean().item():.3f}, std: {x.std().item():.3f}")
-            
-
-
-    # Initialize res_att properly if it's the first block
-    if isinstance(res_att, int):
-        res_att = torch.zeros(
-            batch_size, num_of_features, num_of_vertices, self.d_model,
-            device=x.device, dtype=x.dtype
+    def forward(self, x, res_att):
+        batch_size, num_of_vertices, num_of_features, num_of_timesteps = x.shape
+        assert num_of_timesteps == self.num_of_timesteps, \
+            f"Input timesteps {num_of_timesteps} don't match configured {self.num_of_timesteps}"
+        print(f"Input shape: {x.shape}")
+        assert x.shape[1] == self.num_of_vertices
+        assert x.shape[2] == num_of_features
+        assert x.shape[3] == self.num_of_timesteps
+        print(f"Input device: {x.device}")
+        print(f"Model device: {next(self.parameters()).device}")
+        assert x.is_contiguous(), "Input not contiguous"
+        print(f"Input stats - mean: {x.mean().item():.3f}, std: {x.std().item():.3f}")
+                
+    
+    
+        # Initialize res_att properly if it's the first block
+        if isinstance(res_att, int):
+            res_att = torch.zeros(
+                batch_size, num_of_features, num_of_vertices, self.d_model,
+                device=x.device, dtype=x.dtype
+            )
+        
+        # 1. Temporal Processing
+        x_flat = x.permute(0,1,3,2).reshape(-1, num_of_timesteps)
+        assert x_flat.size(-1) == self.num_of_timesteps, \
+            f"Expected {self.num_of_timesteps} timesteps, got {x_flat.size(-1)}"
+        TEmx = self.EmbedT(x_flat).view(
+            batch_size, num_of_vertices, num_of_features, -1
+        ).permute(0,2,1,3)  # (B,F,N,d_model)
+        
+        # 2. Temporal Attention
+        TAt_out, temporal_att = self.TAt(
+            TEmx, TEmx, TEmx,
+            attn_mask=None,
+            res_att=res_att
         )
-    
-    # 1. Temporal Processing
-    x_flat = x.permute(0,1,3,2).reshape(-1, num_of_timesteps)
-    assert x_flat.size(-1) == self.num_of_timesteps, \
-        f"Expected {self.num_of_timesteps} timesteps, got {x_flat.size(-1)}"
-    TEmx = self.EmbedT(x_flat).view(
-        batch_size, num_of_vertices, num_of_features, -1
-    ).permute(0,2,1,3)  # (B,F,N,d_model)
-    
-    # 2. Temporal Attention
-    TAt_out, temporal_att = self.TAt(
-        TEmx, TEmx, TEmx,
-        attn_mask=None,
-        res_att=res_att
-    )
-    
-    # 3. Spatial Processing
-    SAt_in = TAt_out.permute(0,2,1,3).reshape(-1, num_of_vertices, self.d_model)
-    spatial_att = self.SAt(SAt_in, SAt_in, None)
-    
-    # 4. Chebyshev Convolution
-    x_conv = x.permute(0,2,1,3)  # (B,F,N,T)
-    spatial_gcn = self.cheb_conv_SAt(x_conv, spatial_att, self.adj_pa)
-    
-    # 5. Temporal Convolution
-    time_conv = torch.cat([
-        self.gtu3(spatial_gcn),
-        self.gtu5(spatial_gcn), 
-        self.gtu7(spatial_gcn)
-    ], dim=-1)
-    time_conv = self.fcmy(time_conv)
-    
-    # 6. Residual Connection
-    x_res = x.permute(0,2,1,3)
-    if num_of_features == 1:
-        x_res = self.residual_conv(x_res)
-    
-    output = F.relu(x_res + time_conv)
-    output = output.permute(0,2,1,3)  # (B,N,F,T)
-    
-    # LayerNorm
-    output = output.permute(0,2,3,1)  # (B,F,T,N)
-    output = self.ln(output)
-    output = output.permute(0,3,1,2)  # (B,N,F,T)
-    
-    return output, temporal_att
+        
+        # 3. Spatial Processing
+        SAt_in = TAt_out.permute(0,2,1,3).reshape(-1, num_of_vertices, self.d_model)
+        spatial_att = self.SAt(SAt_in, SAt_in, None)
+        
+        # 4. Chebyshev Convolution
+        x_conv = x.permute(0,2,1,3)  # (B,F,N,T)
+        spatial_gcn = self.cheb_conv_SAt(x_conv, spatial_att, self.adj_pa)
+        
+        # 5. Temporal Convolution
+        time_conv = torch.cat([
+            self.gtu3(spatial_gcn),
+            self.gtu5(spatial_gcn), 
+            self.gtu7(spatial_gcn)
+        ], dim=-1)
+        time_conv = self.fcmy(time_conv)
+        
+        # 6. Residual Connection
+        x_res = x.permute(0,2,1,3)
+        if num_of_features == 1:
+            x_res = self.residual_conv(x_res)
+        
+        output = F.relu(x_res + time_conv)
+        output = output.permute(0,2,1,3)  # (B,N,F,T)
+        
+        # LayerNorm
+        output = output.permute(0,2,3,1)  # (B,F,T,N)
+        output = self.ln(output)
+        output = output.permute(0,3,1,2)  # (B,N,F,T)
+        
+        return output, temporal_att
 
 class DSTAGNN_submodule(nn.Module):
     def __init__(self, DEVICE, num_of_d, nb_block, in_channels, K, nb_chev_filter, nb_time_filter, time_strides,
