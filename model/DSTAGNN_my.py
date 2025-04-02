@@ -422,7 +422,7 @@ def make_model(DEVICE, num_of_d, nb_block, in_channels, K,
     :return:
     '''
     L_tilde = scaled_Laplacian(adj_mx)
-    cheb_polynomials = [torch.from_numpy(i).type(torch.FloatTensor).to(DEVICE) for i in cheb_polynomial(L_tilde, K)]
+    cheb_polynomials = [torch.from_numpy(i).type(torch.FloatTensor).to(DEVICE) for i in cheb_polynomial(L_tilde.cpu().numpy(), K)]
     model = DSTAGNN_submodule(DEVICE, num_of_d, nb_block, in_channels,
                              K, nb_chev_filter, nb_time_filter, time_strides, cheb_polynomials,
                              adj_pa, adj_TMD, num_for_predict, len_input, num_of_vertices, d_model, d_k, d_v, n_heads)
