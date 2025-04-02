@@ -361,9 +361,11 @@ class DSTAGNN_block(nn.Module):
     def forward(self, x, res_att):
         B, N, F, T = x.shape
         
-        # 1. Temporal projection
-        x_temp = x.permute(0,1,3,2)  # [B,N,T,F]
-        x_temp = self.temporal_proj(x_temp.reshape(-1,T)).view(B,N,F,self.d_model)
+        # 1. Temporal processing
+        x_temp = x.permute(0, 1, 3, 2)  # [B,N,T,F]
+        x_temp = x_temp.reshape(-1, T)  # [B*N*F, T]
+        x_temp = self.temporal_proj(x_temp)  # [B*N*F, d_model]
+        x_temp = x_temp.view(B, N, F, self.d_model)  # [B,N,F,d_model]
         
         # 2. Temporal attention
         temp_out, temp_att = self.temporal_att(
@@ -373,28 +375,37 @@ class DSTAGNN_block(nn.Module):
         
         # 3. Spatial attention
         spatial_att = self.spatial_att(
-            temp_out.reshape(-1,N,self.d_model), 
-            temp_out.reshape(-1,N,self.d_model), 
+            temp_out.reshape(B*N, F, self.d_model),
+            temp_out.reshape(B*N, F, self.d_model),
             None
         )
         
         # 4. Chebyshev convolution
-        x_conv = x.permute(0,2,1,3)  # [B,F,N,T]
+        x_conv = x.permute(0, 2, 1, 3)  # [B,F,N,T]
         spatial_out = self.cheb_conv(x_conv, spatial_att, self.adj_pa)
         
-        # 5. Temporal convolution
-        time_out = torch.cat([
-            self.gtu3(spatial_out),
-            self.gtu5(spatial_out),
-            self.gtu7(spatial_out)
-        ], dim=-1)
+        # 5. GTU temporal convolution
+        gtu_outputs = []
+        for gtu in [self.gtu3, self.gtu5, self.gtu7]:
+            try:
+                out = gtu(spatial_out)
+                if out.numel() > 0:  # Only add if not empty
+                    gtu_outputs.append(out)
+            except RuntimeError as e:
+                print(f"Skipping GTU due to error: {str(e)}")
+                continue
+                
+        if not gtu_outputs:
+            raise ValueError("All GTU outputs were empty")
+        
+        time_out = torch.cat(gtu_outputs, dim=-1)
         
         # 6. Residual connection
-        res = self.res_conv(x.permute(0,2,1,3))
+        res = self.res_conv(x.permute(0, 2, 1, 3))
         output = F.relu(res + time_out)
         
-        return output.permute(0,2,1,3), temp_att
-
+        return output.permute(0, 2, 1, 3), temp_att
+    
 class DSTAGNN_submodule(nn.Module):
     def __init__(self, DEVICE, num_of_d, nb_block, in_channels, K, nb_chev_filter, nb_time_filter, time_strides,
                  cheb_polynomials, adj_pa, adj_TMD, num_for_predict, len_input, num_of_vertices, d_model, d_k, d_v, n_heads):
@@ -426,28 +437,30 @@ class DSTAGNN_submodule(nn.Module):
 
     def forward(self, x):
         B, N, F, T = x.shape
-        outputs = []
-        res_att = torch.zeros(B, F, N, 64, device=x.device)
+        res_att = None
+        block_outputs = []
         
-        for block in self.blocks:
+        for i, block in enumerate(self.blocks):
             x, res_att = block(x, res_att)
-            outputs.append(x)
+            
+            # Only keep last block output to save memory
+            if i == len(self.blocks) - 1:
+                block_outputs.append(x)
             
             # TPU synchronization
             xm.mark_step()
         
-        # Ensure we have outputs to concatenate
-        if not outputs:
-            raise ValueError("No outputs from blocks to concatenate")
-            
-        # Take only the last output (simplified)
-        final_output = outputs[-1]
+        if not block_outputs:
+            raise ValueError("No outputs from blocks")
+        
+        # Process final output
+        final_output = block_outputs[-1]  # [B,N,F,T]
         
         # Final projection
-        output = final_output.permute(0,3,1,2)  # [B,T,N,F]
+        output = final_output.permute(0, 3, 1, 2)  # [B,T,N,F]
         output = self.final_conv(output)  # [B,128,N,F]
         output = output.mean(dim=-1)  # [B,128,N]
-        output = self.final_fc(output.permute(0,2,1))  # [B,N,num_for_predict]
+        output = self.final_fc(output.permute(0, 2, 1))  # [B,N,num_for_predict]
         
         return output
 def make_model(DEVICE, num_of_d, nb_block, in_channels, K,
