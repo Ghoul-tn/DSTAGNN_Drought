@@ -79,6 +79,7 @@ class MultiHeadAttention(nn.Module):
         self.W_K = nn.Linear(d_model, d_k * n_heads, bias=False)
         self.W_V = nn.Linear(d_model, d_v * n_heads, bias=False)
         self.fc = nn.Linear(n_heads * d_v, d_model, bias=False)
+        self.layer_norm = nn.LayerNorm(self.d_model).to(self.DEVICE)
 
     def forward(self, input_Q, input_K, input_V, attn_mask, res_att):
         '''
@@ -96,7 +97,7 @@ class MultiHeadAttention(nn.Module):
         context, res_attn = ScaledDotProductAttention(self.d_k, self.num_of_d)(Q, K, V, attn_mask, res_att)
         context = context.transpose(2, 3).reshape(batch_size, self.num_of_d, -1, self.n_heads * self.d_v)
         output = self.fc(context)
-        return nn.LayerNorm(self.d_model).to(self.DEVICE)(output + residual), res_attn
+        return self.layer_norm(output + residual), res_attn
 
 class cheb_conv_withSAt(nn.Module):
     '''
