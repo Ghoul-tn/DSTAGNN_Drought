@@ -144,7 +144,9 @@ def main():
         for batch_idx, (encoder_inputs, labels) in enumerate(train_loader):
             xm.optimizer_step(optimizer, barrier=True)  # TPU sync
             if batch_idx % 10 == 0:
-                xm.master_print(f"Batch {batch_idx} completed")            
+                xm.master_print(f"Batch {batch_idx} completed")
+            if batch_idx % 100 == 0:
+                print(f"Memory usage: {xm.get_memory_info(device)}")
             optimizer.zero_grad()
             outputs = net(encoder_inputs)
             loss = criterion(outputs, labels)
