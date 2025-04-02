@@ -55,7 +55,10 @@ def main():
         int(training_config['num_of_weeks']),
         'cpu',  # Load to CPU first
         int(training_config['batch_size']))
-    
+    # Check your data loader
+    print(f"Train loader: {len(train_loader)} batches")
+    sample = next(iter(train_loader))
+    print(f"Sample batch shapes: {sample[0].shape}, {sample[1].shape}")
     # Load adjacency matrices on CPU
     if data_config['dataset_name'] in ['PEMS04', 'PEMS08', 'PEMS07', 'PEMS03']:
         adj_mx = get_adjacency_matrix2(data_config['adj_filename'], 
@@ -144,6 +147,8 @@ def main():
         for batch_idx, (encoder_inputs, labels) in enumerate(train_loader):
             xm.optimizer_step(optimizer, barrier=True)  # TPU sync
             if batch_idx % 10 == 0:
+                print(f"Batch {batch_idx} - Input shape: {encoder_inputs.shape}")
+                print(f"Batch {batch_idx} - Output shape: {outputs.shape}")
                 xm.master_print(f"Batch {batch_idx} completed")
             if batch_idx % 100 == 0:
                 print(f"Memory usage: {xm.get_memory_info(device)}")
