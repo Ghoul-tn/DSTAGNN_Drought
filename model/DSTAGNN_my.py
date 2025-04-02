@@ -233,7 +233,7 @@ class Embedding(nn.Module):
         self.num_of_features = num_of_features
         self.pos_embed = nn.Embedding(nb_seq, d_Em)
         self.norm = nn.LayerNorm(d_Em)
-
+        self.DEVICE = DEVICE
     def forward(self, x, batch_size):
         if self.Etype == 'T':
             pos = torch.arange(self.nb_seq, dtype=torch.long).to(DEVICE)
@@ -279,7 +279,7 @@ class DSTAGNN_block(nn.Module):
 
         self.pre_conv = nn.Conv2d(num_of_timesteps, d_model, kernel_size=(1, num_of_d))
 
-        self.EmbedT = Embedding(num_of_timesteps, num_of_vertices, num_of_d, 'T')
+        self.EmbedT = Embedding(num_of_timesteps, num_of_vertices, num_of_d, 'T', DEVICE)
         self.EmbedS = Embedding(num_of_vertices, d_model, num_of_d, 'S', DEVICE)
 
         self.TAt = MultiHeadAttention(DEVICE, num_of_vertices, d_k, d_v, n_heads, num_of_d)
